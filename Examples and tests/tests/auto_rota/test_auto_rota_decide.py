@@ -17,6 +17,7 @@ from Widgets.Automation.Helpers.AutoRota.auto_rota_src.decide import can_hit  # 
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.decide import choose_interrupt  # noqa: E402
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.decide import classify  # noqa: E402
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.decide import is_eligible_build  # noqa: E402
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.key_edge import KeyEdge  # noqa: E402
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.model import BuildCandidate  # noqa: E402
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.model import CastKind  # noqa: E402
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.model import Decision  # noqa: E402
@@ -252,6 +253,22 @@ class BuildEligibilityTests(unittest.TestCase):
     def test_build_overriding_skill_casting_is_rejected(self) -> None:
         candidate = BuildCandidate(primary_is_mesmer=True, is_fallback_candidate=False, overrides_skill_casting=True)
         self.assert_eligible(candidate, False)
+
+
+class KeyEdgeTests(unittest.TestCase):
+    def assert_events(self, samples: list[bool], expected: list[bool], context: str) -> None:
+        edge = KeyEdge()
+        observed = [edge.update(is_down) for is_down in samples]
+        self.assertEqual(observed, expected, f"{context}: samples={samples} expected={expected} observed={observed}")
+
+    def test_holding_the_key_fires_once(self) -> None:
+        self.assert_events([False, True, True, True, False], [False, True, False, False, False], "one held press")
+
+    def test_two_separate_presses_fire_twice(self) -> None:
+        self.assert_events([False, True, False, True, False], [False, True, False, True, False], "two presses")
+
+    def test_key_already_down_at_start_does_not_fire(self) -> None:
+        self.assert_events([True, True, False, True], [False, False, False, True], "held when widget starts")
 
 
 if __name__ == "__main__":

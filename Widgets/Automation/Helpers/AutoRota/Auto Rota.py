@@ -2,18 +2,19 @@
 
 from __future__ import annotations
 
+import ctypes
 import time
 import traceback
 from collections import deque
 
 import PyImGui
+import PySystem
 
 from Py4GWCoreLib import Player
 from Py4GWCoreLib import Routines
 from Py4GWCoreLib import Timer
 from Py4GWCoreLib.enums_src.IO_enums import Key
 from Py4GWCoreLib.HeroAI.cache_data import CacheData
-from Py4GWCoreLib.HotkeyManager import HOTKEY_MANAGER
 from Py4GWCoreLib.py4gwcorelib_src.Console import Console
 from Py4GWCoreLib.py4gwcorelib_src.Console import ConsoleLog
 from Py4GWCoreLib.py4gwcorelib_src.Settings import Settings
@@ -21,13 +22,13 @@ from Widgets.Automation.Helpers.AutoRota.auto_rota_src.build_mode import BuildMo
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.build_mode import BuildPassOutcome
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.game_adapter import REASON_BUSY
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.game_adapter import GameAdapter
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.key_edge import KeyEdge
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.model import Decision
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.priorities import BUILD_MODE_MAX_TIER
 
 MODULE_NAME = "Auto Rota"
 MODULE_ICON = "Assets/Textures/Module_Icons/Combat.png"
 
-_HOTKEY_ID = "auto_rota.play"
 _SETTINGS_SECTION = "AutoRota"
 _SETTINGS_HOTKEY = "hotkey"
 _PREVIEW_INTERVAL_MS = 100
@@ -53,8 +54,10 @@ _preview_timer.Start()
 _preview_text = "-"
 _heroai_conflict = False
 _history: deque[str] = deque(maxlen=_HISTORY_SIZE)
-_hotkey_registered = False
+_key_loaded = False
 _key_index = 0
+_key_edge = KeyEdge()
+_ignored_text = ""
 _main_tick_s = 0.0
 _logged_errors: set[str] = set()
 
@@ -85,13 +88,24 @@ def _load_key_index() -> int:
     return 0
 
 
-def _on_hotkey() -> None:
+def _is_key_down(vk_code: int) -> bool:
+    # Read the key straight from Windows: HOTKEY_MANAGER feeds Win32 VK codes to PyImGui.is_key_pressed,
+    # which takes ImGuiKey codes since the ImGui migration, so it never fires for keys like F1.
+    return bool(ctypes.windll.user32.GetAsyncKeyState(vk_code) & 0x8000)
+
+
+def _ignore_press(reason: str) -> None:
+    global _ignored_text
+    _ignored_text = f"{time.strftime('%H:%M:%S')}  {reason}"
+
+
+def _on_key_press() -> None:
     try:
-        if not PyImGui.is_key_pressed(_KEY_CHOICES[_key_index][1].value, False):
-            return  # ignore auto-repeat while the key is held
-        if time.monotonic() - _main_tick_s > _HEARTBEAT_MAX_S:
-            return  # widget paused, loading, or main() not running
+        if not PySystem.window.is_window_active():
+            _ignore_press("Guild Wars sem foco")
+            return
         if Player.IsTyping() or PyImGui.get_io().want_text_input:
+            _ignore_press("a escrever (chat ou campo de texto)")
             return
         if _build_mode.busy:
             _push_history(f"recusado: {REASON_BUSY}")
@@ -116,7 +130,7 @@ def _on_hotkey() -> None:
         _build_mode.request_pass()  # the widget's main() drives the pass over the next frames
     except Exception as exc:
         _push_history(f"erro: {exc}")
-        _log_error("hotkey", exc)
+        _log_error("key press", exc)
 
 
 def _finish_build_pass(outcome: BuildPassOutcome) -> None:
@@ -145,13 +159,6 @@ def _finish_build_pass(outcome: BuildPassOutcome) -> None:
     _push_history(_adapter.describe(decision))
 
 
-def _register_hotkey() -> None:
-    global _hotkey_registered
-    # Re-registering the same identifier replaces the previous key binding.
-    HOTKEY_MANAGER.register_hotkey(_KEY_CHOICES[_key_index][1], _HOTKEY_ID, _on_hotkey, name="Auto Rota: jogada")
-    _hotkey_registered = True
-
-
 def _update_preview() -> None:
     global _preview_text, _heroai_conflict
     _heroai_conflict = _adapter.heroai_conflict()
@@ -168,7 +175,7 @@ def _update_preview() -> None:
 
 
 def _draw_window() -> None:
-    global _key_index
+    global _key_index, _key_edge
     opened = PyImGui.begin(MODULE_NAME, int(PyImGui.WindowFlags.AlwaysAutoResize))
     try:
         if opened:
@@ -183,7 +190,9 @@ def _draw_window() -> None:
             if new_index != _key_index:
                 _key_index = new_index
                 _settings.set_str(_SETTINGS_SECTION, _SETTINGS_HOTKEY, _KEY_CHOICES[new_index][1].name)
-                _register_hotkey()
+                _key_edge = KeyEdge()
+            if _ignored_text:
+                PyImGui.text(f"Ultimo toque ignorado: {_ignored_text}")
             PyImGui.separator()
             PyImGui.text("Historico:")
             for line in _history:
@@ -206,14 +215,11 @@ def tooltip() -> None:
 
 
 def on_disable() -> None:
-    global _hotkey_registered
-    HOTKEY_MANAGER.unregister_hotkey(_HOTKEY_ID)
-    _hotkey_registered = False
     _build_mode.cancel()
 
 
 def main() -> None:
-    global _key_index, _main_tick_s, _preview_text
+    global _key_index, _key_loaded, _main_tick_s, _preview_text
     try:
         if not Routines.Checks.Map.MapValid():
             _build_mode.cancel()
@@ -225,13 +231,15 @@ def main() -> None:
         if time.monotonic() - _main_tick_s > _HEARTBEAT_MAX_S:
             _build_mode.cancel()  # main() was not ticking (pause, load, stall): never resume an old pass
         _main_tick_s = time.monotonic()
-        if not _hotkey_registered:
+        if not _key_loaded:
             _key_index = _load_key_index()
-            _register_hotkey()
+            _key_loaded = True
         try:
             _build_mode.refresh()
         except Exception as exc:
             _log_error_once("build", exc)
+        if _key_edge.update(_is_key_down(_KEY_CHOICES[_key_index][1].value)):
+            _on_key_press()
         outcome = _build_mode.advance()
         if outcome is not None:
             try:
