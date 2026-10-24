@@ -1,6 +1,6 @@
 # Auto Rota — modo build
 
-Data: 2026-10-24 · Estado: design aprovado · Branch: `feature/auto-rota`
+Data: 2026-10-24 · Estado: implementado, por validar no jogo · Branch: `feature/auto-rota`
 Depende de: `docs/superpowers/specs/2026-10-24-auto-rota-design.md`
 
 ## Objetivo
@@ -78,13 +78,24 @@ Junta-se uma nova razão de "ocupado": está uma passagem da build a decorrer.
    - Se a build lançou uma skill, regista-a no histórico:
      `Energy Surge -> <alvo> [Build: Energy Surge]`. O alvo aparece como
      "(sem alvo)" quando o id do alvo é 0.
-   - Se não lançou nada, corre no mesmo frame a rotação privada da Auto Rota,
+   - Se não lançou nada, volta a correr o `blocker()`, porque o jogador pode
+     ter sido derrubado, ou o HeroAI ligado, durante a passagem. Se nada
+     impedir, corre no mesmo frame a rotação privada da Auto Rota,
      com as skills da build mascaradas
      (`CombatClass.ApplyBlockedSkillIDs(build.GetBlockedSkills())`). Assim só se
      usam skills fora da build.
    - Se nem isso lançar nada, regista "nada a fazer".
 5. Sem build detetada, a máscara da rotação privada é limpa
    (`ApplyBlockedSkillIDs([])`).
+
+**"Ocupado" e cancelamento da passagem.** O "ocupado" durante uma passagem é
+verificado no widget (`_build_mode.busy`), antes do `blocker()` do adapter.
+Uma passagem nunca continua sem um toque recente:
+- um pedido com mais de 500 ms que ainda não começou é descartado em silêncio;
+- uma passagem que já passou dos 500 ms é fechada sem dar mais nenhum passo;
+- `BuildMode.cancel()` fecha a passagem e esquece o pedido quando o widget é
+  desligado (`on_disable`), quando o mapa não está pronto, e quando o `main()`
+  esteve mais de 0,5 s sem correr (pausa do widget, carregamento, travão).
 
 ## Registo da última skill lançada (alteração no `BuildMgr`)
 
@@ -94,8 +105,15 @@ Alteração aditiva em `Py4GWCoreLib/BuildMgr.py`, o dono do lançamento:
   `self.last_cast = (skill_id, target_agent_id)`.
 
 Nada mais muda para quem já usa o `BuildMgr`. Todos os lançamentos das builds
-de Mesmer e dos helpers `Builds/Skills/*` passam por `CastSkillID`. Esta é a
-única alteração fora da pasta da Auto Rota.
+de Mesmer elegíveis passam por `CastSkillID`, diretamente ou através de
+`CastSkillIDAndRestoreTarget`. Esta é a única alteração fora da pasta da Auto Rota.
+
+**Limitação conhecida.** `BuildMgr.CastSkillSlot` e o caminho do eco do Ray of
+Judgment (`Builds/Skills/Monk/SmitingPrayers.py`) chamam `UseSkill` diretamente
+e não registam `last_cast`. Hoje nenhuma build de Mesmer elegível os usa. A
+única que usa `CastSkillSlot` é a de farm `SF_Mes_vaettir`, que está excluída.
+Se uma build futura os usar, uma passagem que lançou uma skill seria vista como
+"nada lançado" e a rotação lançaria uma segunda skill no mesmo toque.
 
 ## Janela
 
@@ -112,9 +130,9 @@ de Mesmer e dos helpers `Builds/Skills/*` passam por `CastSkillID`. Esta é a
 | `auto_rota_src/priorities.py` | `BUILD_MODE_MAX_TIER = Tier.ELITE` |
 | `auto_rota_src/decide.py` | `choose_interrupt(..., max_tier: Tier = Tier.OTHER)` ignora casts acima do limite; nova função pura `is_eligible_build(candidate) -> bool` |
 | `auto_rota_src/model.py` | `BuildCandidate(primary_is_mesmer: bool, is_fallback_candidate: bool, overrides_skill_casting: bool)` |
-| `auto_rota_src/build_mode.py` (novo) | Ponte para o `BuildRegistry`: assinatura da barra, resolução e cache da build, `SetFallback(None, None)`, criação, avanço e timeout da passagem, leitura do `last_cast` |
-| `auto_rota_src/game_adapter.py` | `next_decision(preview, max_tier)` passa o limite de nível ao `choose_interrupt`; `rotation_after_build(blocked_skill_ids)` aplica a máscara e devolve a jogada da rotação; o `blocker()` passa a devolver "ocupado" durante uma passagem |
-| `Auto Rota.py` | Callback marca a passagem pedida; `main()` avança a passagem; linha "Build"; textos da pré-visualização e do histórico |
+| `auto_rota_src/build_mode.py` (novo) | `BuildMode`: assinatura da barra, resolução e cache da build, `SetFallback(None, None)`, pedido, avanço, timeout e `cancel()` da passagem, leitura do `last_cast`; `BuildPassOutcome(cast, error)` |
+| `auto_rota_src/game_adapter.py` | `interrupt_decision(max_tier)`, `rotation_after_build(blocked_skill_ids)`, `note_external_cast()`; máscara de skills no `_sync_combat`; `describe(decision, no_target_text)` |
+| `Auto Rota.py` | A tecla trata dos interrupts e pede a passagem; o `main()` conduz e cancela a passagem; `_finish_build_pass`; linha "Build"; textos da pré-visualização, do histórico e do tooltip |
 | `Py4GWCoreLib/BuildMgr.py` | Campo `last_cast` (secção anterior) |
 
 Tal como na spec base, só `game_adapter.py` e `build_mode.py` falam com o jogo.

@@ -48,6 +48,9 @@ Cada toque na tecla faz **uma** jogada. O widget nunca age sozinho.
 5. **Nada a fazer.** Se não houver nenhuma das duas, não faz nada e regista
    "nada a fazer".
 
+Com uma build de Mesmer detetada, o comportamento muda conforme
+`docs/superpowers/specs/2026-10-24-auto-rota-build-mode-design.md`.
+
 A skill é lançada com `GLOBAL_CACHE.SkillBar.UseSkill(slot, alvo,
 aftercast_delay=250)`, que a põe na fila de ações `ACTION`. Nunca se chama o
 `HandleCombat` do HeroAI, por isso não se publicam os locks de cooldown nem de
