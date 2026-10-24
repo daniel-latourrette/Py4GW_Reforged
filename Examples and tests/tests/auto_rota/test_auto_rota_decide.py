@@ -206,6 +206,20 @@ class ChooseInterruptTests(unittest.TestCase):
         expected = Decision(bar_slot=6, skill_id=501, target_id=10, label="Interrupt: Cura", enemy_skill_id=777)
         self.assertEqual(observed, expected, f"full decision expected={expected} observed={observed}")
 
+    def test_max_tier_skips_casts_below_the_limit(self) -> None:
+        casts = [make_cast(agent_id=10, activation_ms=3000), make_cast(agent_id=20)]
+        observed = choose_interrupt(casts, [make_slot()], always, max_tier=Tier.ELITE)
+        self.assert_choice(observed, None, None, "only long-cast and other casts, limit ELITE")
+
+    def test_max_tier_keeps_casts_within_the_limit(self) -> None:
+        casts = [make_cast(agent_id=10, activation_ms=3000), make_cast(agent_id=20, is_healing=True)]
+        observed = choose_interrupt(casts, [make_slot()], always, max_tier=Tier.ELITE)
+        self.assert_choice(observed, 20, 500, "healing within limit ELITE")
+
+    def test_default_max_tier_allows_every_tier(self) -> None:
+        observed = choose_interrupt([make_cast(agent_id=10)], [make_slot()], always)
+        self.assert_choice(observed, 10, 500, "OTHER cast with default limit")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -24,6 +24,10 @@ TIER_LABELS: dict[Tier, str] = {
 
 LONG_CAST_MS = 2000
 
+# In build mode the Auto Rota only interrupts casts up to this tier; lower tiers are left to the
+# build's own (damage-optimised) interrupt logic.
+BUILD_MODE_MAX_TIER = Tier.ELITE
+
 # Member names of Py4GWCoreLib.enums_src.GameData_enums.Attribute. Kept as
 # strings so this module stays importable outside the game runtime.
 HEALING_ATTRIBUTE_NAMES: tuple[str, ...] = ("HealingPrayers", "ProtectionPrayers", "RestorationMagic")

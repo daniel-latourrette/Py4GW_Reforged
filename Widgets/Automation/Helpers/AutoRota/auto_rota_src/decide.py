@@ -59,15 +59,18 @@ def choose_interrupt(
     casts: Sequence[EnemyCast],
     slots: Sequence[InterruptSlot],
     feasible: FeasibilityCheck,
+    max_tier: Tier = Tier.OTHER,
 ) -> Optional[Decision]:
     """Pick the best (interrupt, cast) pair.
 
-    Casts are tried by lowest tier, then earliest finish (input order breaks exact ties). For each
-    cast, slots are tried in the given order (CombatClass priority order); `feasible` is only called
-    for slots whose reach can hit the cast.
+    Casts are tried by lowest tier, then earliest finish (input order breaks exact ties). Casts whose
+    tier is above `max_tier` are ignored. For each cast, slots are tried in the given order
+    (CombatClass priority order); `feasible` is only called for slots whose reach can hit the cast.
     """
     for cast in sorted(casts, key=_cast_key):
         tier = classify(cast)
+        if tier > max_tier:
+            break  # casts are sorted by tier, so every remaining cast is above the limit too
         for slot in slots:
             if can_hit(slot.reach, cast.kind) and feasible(slot, cast):
                 return Decision(
