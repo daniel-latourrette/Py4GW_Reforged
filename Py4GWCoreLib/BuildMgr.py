@@ -65,6 +65,8 @@ class BuildMgr:
         self._local_combat_handler: BuildHandler | None = None
         self._custom_skill_data_handler: CustomSkillClass | None = None
         self._cached_data: Any = None
+        # (skill_id, target_agent_id) of the last skill this build queued through CastSkillID.
+        self.last_cast: tuple[int, int] | None = None
 
         self.minimum_required_match = len(self.required_skills)
         self.tick_state = None
@@ -1938,6 +1940,7 @@ class BuildMgr:
             self._whiteboard_post_intent(skill_id, target_agent_id)
 
         GLOBAL_CACHE.SkillBar.UseSkill(slot, target_agent_id=target_agent_id, aftercast_delay=aftercast_delay)
+        self.last_cast = (skill_id, target_agent_id)
         self._mark_local_cast_pending(aftercast_delay)
         if self._is_spirit_skill(skill_id):
             yield from Routines.Yield.wait(self._get_spirit_cast_wait_ms(skill_id, aftercast_delay))
