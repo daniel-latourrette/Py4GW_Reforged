@@ -1,4 +1,4 @@
-"""Auto Rota: one key press, one best play (Mesmer-focused interrupts first)."""
+"""Auto Rota: a key toggles an automatic Mesmer play loop on and off (interrupts first)."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import ctypes
 import time
 import traceback
 from collections import deque
+from typing import Optional
 
 import PyImGui
 import PySystem
@@ -21,8 +22,10 @@ from Py4GWCoreLib.py4gwcorelib_src.Settings import Settings
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.build_mode import BuildMode
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.build_mode import BuildPassOutcome
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.game_adapter import REASON_BUSY
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.game_adapter import STOP_REASONS
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.game_adapter import GameAdapter
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.key_edge import KeyEdge
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.key_edge import next_auto_state
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.model import Decision
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.priorities import BUILD_MODE_MAX_TIER
 
@@ -36,6 +39,7 @@ _HISTORY_SIZE = 5
 _HEARTBEAT_MAX_S = 0.5
 _LOGGED_ERRORS_MAX = 64
 _WARNING_COLOR = (1.0, 0.35, 0.35, 1.0)
+_ON_COLOR = (0.35, 1.0, 0.45, 1.0)
 _KEY_CHOICES: list[tuple[str, Key]] = [
     ("` (acento grave)", Key.VK_OEM_3),
     ("F1", Key.VK_F1),
@@ -58,6 +62,7 @@ _key_loaded = False
 _key_index = 0
 _key_edge = KeyEdge()
 _ignored_text = ""
+_auto_on = False
 _main_tick_s = 0.0
 _logged_errors: set[str] = set()
 
@@ -99,38 +104,54 @@ def _ignore_press(reason: str) -> None:
     _ignored_text = f"{time.strftime('%H:%M:%S')}  {reason}"
 
 
-def _on_key_press() -> None:
-    try:
-        if not PySystem.window.is_window_active():
-            _ignore_press("Guild Wars sem foco")
-            return
-        if Player.IsTyping() or PyImGui.get_io().want_text_input:
-            _ignore_press("a escrever (chat ou campo de texto)")
-            return
-        if _build_mode.busy:
-            _push_history(f"recusado: {REASON_BUSY}")
-            return
-        reason = _adapter.blocker()
-        if reason is not None:
-            _push_history(f"recusado: {reason}")
-            return
-        if _build_mode.build_name is None:
-            decision = _adapter.next_decision()
-            if decision is None:
-                _push_history("nada a fazer")
-                return
+def _set_auto(on: bool, reason: str = "") -> None:
+    global _auto_on
+    if on == _auto_on:
+        return
+    _auto_on = on
+    if on:
+        _push_history("Auto Rota LIGADA")
+        return
+    _build_mode.cancel()
+    _push_history(f"Auto Rota DESLIGADA ({reason})" if reason else "Auto Rota DESLIGADA")
+
+
+def _stop_reason() -> Optional[str]:
+    """A blocker that must switch the toggle off (death, outpost, HeroAI combat), else None."""
+    reason = _adapter.blocker()
+    return reason if reason in STOP_REASONS else None
+
+
+def _on_toggle_press() -> None:
+    if not PySystem.window.is_window_active():
+        _ignore_press("Guild Wars sem foco")
+        return
+    if Player.IsTyping() or PyImGui.get_io().want_text_input:
+        _ignore_press("a escrever (chat ou campo de texto)")
+        return
+    stop_reason = _stop_reason()
+    turning_on = not _auto_on
+    if turning_on and stop_reason is not None:
+        _push_history(f"recusado: {stop_reason}")
+    _set_auto(next_auto_state(_auto_on, True, stop_reason is not None), stop_reason or "")
+
+
+def _play_once() -> None:
+    """One play while the toggle is on; silent when busy or when there is nothing to do."""
+    if _build_mode.busy or _adapter.blocker() is not None:
+        return
+    if _build_mode.build_name is None:
+        decision = _adapter.next_decision()
+        if decision is not None:
             _adapter.execute(decision)
             _push_history(_adapter.describe(decision))
-            return
-        interrupt = _adapter.interrupt_decision(BUILD_MODE_MAX_TIER)
-        if interrupt is not None:
-            _adapter.execute(interrupt)
-            _push_history(_adapter.describe(interrupt))
-            return
-        _build_mode.request_pass()  # the widget's main() drives the pass over the next frames
-    except Exception as exc:
-        _push_history(f"erro: {exc}")
-        _log_error("key press", exc)
+        return
+    interrupt = _adapter.interrupt_decision(BUILD_MODE_MAX_TIER)
+    if interrupt is not None:
+        _adapter.execute(interrupt)
+        _push_history(_adapter.describe(interrupt))
+        return
+    _build_mode.request_pass()  # main() drives the pass over the next frames
 
 
 def _finish_build_pass(outcome: BuildPassOutcome) -> None:
@@ -142,21 +163,16 @@ def _finish_build_pass(outcome: BuildPassOutcome) -> None:
         cast = Decision(bar_slot=0, skill_id=skill_id, target_id=target_id, label=label)
         _push_history(_adapter.describe(cast, no_target_text="(sem alvo)"))
     if outcome.error is not None:
-        _push_history(f"erro: {outcome.error}")
+        # A build that fails once will usually fail every frame: switch off instead of flooding.
+        _set_auto(False, f"erro na build: {outcome.error}")
         ConsoleLog(MODULE_NAME, f"build pass: {outcome.error}", Console.MessageType.Error)
         return
-    if outcome.cast is not None:
-        return
-    reason = _adapter.blocker()
-    if reason is not None:
-        _push_history(f"recusado: {reason}")
+    if outcome.cast is not None or not _auto_on or _adapter.blocker() is not None:
         return
     decision = _adapter.rotation_after_build(_build_mode.blocked_skill_ids())
-    if decision is None:
-        _push_history("nada a fazer")
-        return
-    _adapter.execute(decision)
-    _push_history(_adapter.describe(decision))
+    if decision is not None:
+        _adapter.execute(decision)
+        _push_history(_adapter.describe(decision))
 
 
 def _update_preview() -> None:
@@ -171,7 +187,7 @@ def _update_preview() -> None:
         _preview_text = _adapter.describe(decision) if decision is not None else "nada a fazer"
         return
     interrupt = _adapter.interrupt_decision(BUILD_MODE_MAX_TIER)
-    _preview_text = _adapter.describe(interrupt) if interrupt is not None else "jogada da build (decidida ao carregar)"
+    _preview_text = _adapter.describe(interrupt) if interrupt is not None else "jogada da build (decidida ao jogar)"
 
 
 def _draw_window() -> None:
@@ -179,6 +195,11 @@ def _draw_window() -> None:
     opened = PyImGui.begin(MODULE_NAME, int(PyImGui.WindowFlags.AlwaysAutoResize))
     try:
         if opened:
+            key_label = _KEY_CHOICES[_key_index][0]
+            if _auto_on:
+                PyImGui.text_colored(f"LIGADA  ({key_label} para desligar)", _ON_COLOR)
+            else:
+                PyImGui.text(f"DESLIGADA  ({key_label} para ligar)")
             if _heroai_conflict:
                 PyImGui.text_colored("HeroAI com combate ligado: Auto Rota em pausa", _WARNING_COLOR)
             build_name = _build_mode.build_name
@@ -205,16 +226,20 @@ def tooltip() -> None:
     PyImGui.begin_tooltip()
     PyImGui.text("Auto Rota")
     PyImGui.separator()
-    PyImGui.text("Cada toque na tecla faz uma jogada:")
-    PyImGui.bullet_text("1. Interrupt por prioridade (ressurreicao, cura, elite, cast longo)")
+    PyImGui.text("A tecla liga e desliga. Ligada, joga sozinha:")
+    PyImGui.bullet_text("1. Interrupt por prioridade em qualquer inimigo")
     PyImGui.bullet_text("   (com build detetada: so ressurreicao, cura e elite)")
     PyImGui.bullet_text("2. Senao, a jogada da build de Mesmer detetada, se houver")
     PyImGui.bullet_text("3. Senao, a proxima skill da rotacao do HeroAI")
-    PyImGui.text("Nao funciona com o combate do HeroAI ligado.")
+    PyImGui.text("Ataque e hexes vao para o alvo que selecionares (ao alcance); sem alvo, nao ataca.")
+    PyImGui.text("Excecao: com build detetada, a jogada da build escolhe o proprio alvo.")
+    PyImGui.text("Desliga ao morrer, mudar de mapa ou ligar o combate do HeroAI.")
     PyImGui.end_tooltip()
 
 
 def on_disable() -> None:
+    global _auto_on
+    _auto_on = False
     _build_mode.cancel()
 
 
@@ -222,13 +247,16 @@ def main() -> None:
     global _key_index, _key_loaded, _main_tick_s, _preview_text
     try:
         if not Routines.Checks.Map.MapValid():
+            _set_auto(False, "mudanca de mapa")
             _build_mode.cancel()
             return
         _cached_data.Update()
         if not (Routines.Checks.Map.IsMapReady() and Routines.Checks.Party.IsPartyLoaded()):
+            _set_auto(False, "mudanca de mapa")
             _build_mode.cancel()
             return
         if time.monotonic() - _main_tick_s > _HEARTBEAT_MAX_S:
+            _set_auto(False, "widget em pausa")
             _build_mode.cancel()  # main() was not ticking (pause, load, stall): never resume an old pass
         _main_tick_s = time.monotonic()
         if not _key_loaded:
@@ -239,14 +267,28 @@ def main() -> None:
         except Exception as exc:
             _log_error_once("build", exc)
         if _key_edge.update(_is_key_down(_KEY_CHOICES[_key_index][1].value)):
-            _on_key_press()
+            try:
+                _on_toggle_press()
+            except Exception as exc:
+                _push_history(f"erro: {exc}")
+                _log_error("key press", exc)
+        if _auto_on:
+            stop_reason = _stop_reason()
+            if stop_reason is not None:
+                _set_auto(False, stop_reason)
+            else:
+                try:
+                    _play_once()
+                except Exception as exc:
+                    _set_auto(False, f"erro: {exc}")
+                    _log_error_once("auto play", exc)
         outcome = _build_mode.advance()
         if outcome is not None:
             try:
                 _finish_build_pass(outcome)
             except Exception as exc:
-                _push_history(f"erro: {exc}")
-                _log_error("build pass", exc)
+                _set_auto(False, f"erro: {exc}")
+                _log_error_once("build pass", exc)
         if _preview_timer.HasElapsed(_PREVIEW_INTERVAL_MS):
             _preview_timer.Reset()
             try:

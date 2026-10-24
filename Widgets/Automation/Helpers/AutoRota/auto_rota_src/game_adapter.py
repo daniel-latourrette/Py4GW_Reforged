@@ -14,6 +14,7 @@ from typing import Optional
 from typing import Sequence
 
 from Py4GWCoreLib import GLOBAL_CACHE
+from Py4GWCoreLib import ActionQueueManager
 from Py4GWCoreLib import Agent
 from Py4GWCoreLib import AgentArray
 from Py4GWCoreLib import Player
@@ -51,6 +52,11 @@ REASON_NOT_EXPLORABLE = "fora de combate (outpost)"
 REASON_DEAD = "personagem morto"
 REASON_BUSY = "ocupado"
 
+# Blockers that switch the Auto Rota toggle off (as opposed to "busy", which only delays the next play).
+STOP_REASONS: frozenset[str] = frozenset({REASON_HEROAI, REASON_NOT_EXPLORABLE, REASON_DEAD})
+
+_ENEMY_ALLEGIANCE = 3  # Py4GWCoreLib Allegiance.Enemy
+
 _DEBOUNCE_MS = 250
 _AFTERCAST_MS = 250
 
@@ -70,6 +76,44 @@ _RESERVING_ALLEGIANCES: frozenset[int] = frozenset(
         Skilltarget.ResurrectionAlly.value,
         Skilltarget.HexedAlly.value,
         Skilltarget.ExploitableCorpse.value,
+    }
+)
+
+# Attack skills (enemy-targeted, not interrupts) go to the target the player selected. With
+# is_targeting_enabled False, CombatClass.GetAppropiateTarget returns Player.GetTargetID(), so the
+# skill's cast conditions are checked against that target (e.g. a hex is not re-applied).
+_PLAYER_TARGETED_ALLEGIANCES: frozenset[int] = frozenset(
+    {
+        Skilltarget.Enemy.value,
+        Skilltarget.EnemyCaster.value,
+        Skilltarget.EnemyMartial.value,
+        Skilltarget.EnemyMartialMelee.value,
+        Skilltarget.EnemyMartialRanged.value,
+        Skilltarget.EnemyClustered.value,
+        Skilltarget.EnemyAttacking.value,
+        Skilltarget.EnemyCasting.value,
+        Skilltarget.EnemyCastingSpell.value,
+        Skilltarget.EnemyCastingSpellOrChant.value,
+        Skilltarget.EnemyInjured.value,
+        Skilltarget.EnemyConditioned.value,
+        Skilltarget.EnemyHexed.value,
+        Skilltarget.EnemyDegenHexed.value,
+        Skilltarget.EnemyEnchanted.value,
+        Skilltarget.EnemyMoving.value,
+        Skilltarget.EnemyKnockedDown.value,
+        Skilltarget.EnemyBleeding.value,
+        Skilltarget.EnemyPoisoned.value,
+        Skilltarget.EnemyCrippled.value,
+        Skilltarget.EnemyHealthy.value,
+        Skilltarget.EnemyNotNearby.value,
+    }
+)
+
+_MARTIAL_ALLEGIANCES: frozenset[int] = frozenset(
+    {
+        Skilltarget.EnemyMartial.value,
+        Skilltarget.EnemyMartialMelee.value,
+        Skilltarget.EnemyMartialRanged.value,
     }
 )
 
@@ -130,7 +174,7 @@ class GameAdapter:
         return bool(options is not None and options.Combat)
 
     def blocker(self) -> Optional[str]:
-        """Return why a key press must be refused right now, or None."""
+        """Return why no play may be made right now, or None."""
         if self.heroai_conflict():
             return REASON_HEROAI
         if not Routines.Checks.Map.IsExplorable():
@@ -143,6 +187,8 @@ class GameAdapter:
             return REASON_BUSY
         if (time.monotonic() - self._last_execute_s) * 1000.0 < _DEBOUNCE_MS:
             return REASON_BUSY
+        if not ActionQueueManager().IsEmpty("ACTION"):
+            return REASON_BUSY  # a queued cast has not run yet: never stack another behind it
         return None
 
     def _enemy_casts(self) -> list[EnemyCast]:
@@ -233,8 +279,39 @@ class GameAdapter:
             ping_ms=int(combat.ping_handler.GetCurrentPing()),
         )
 
+    @staticmethod
+    def _selected_enemy() -> int:
+        """The player's selected target if it is a living enemy within cast range, else 0.
+
+        Out-of-range targets count as "no target": UseSkill would make the character walk there,
+        overriding the player's own movement.
+        """
+        target_id = int(Player.GetTargetID() or 0)
+        if target_id == 0 or not Agent.IsValid(target_id) or not Agent.IsLiving(target_id):
+            return 0
+        if Agent.IsDead(target_id):
+            return 0
+        allegiance, _ = Agent.GetAllegiance(target_id)
+        if int(allegiance) != _ENEMY_ALLEGIANCE:
+            return 0
+        if Utils.Distance(Player.GetXY(), Agent.GetXY(target_id)) > Range.Spellcast.value:
+            return 0
+        return target_id
+
+    @staticmethod
+    def _matches_target_kind(allegiance: int, target_id: int) -> bool:
+        # These filters only live in HeroAI's target resolver, which is bypassed for the selected target.
+        if allegiance == Skilltarget.EnemyCaster.value:
+            return Agent.IsCaster(target_id)
+        if allegiance in _MARTIAL_ALLEGIANCES:
+            return Agent.IsMartial(target_id)
+        if allegiance == Skilltarget.EnemyKnockedDown.value:
+            return Agent.IsKnockedDown(target_id)
+        return True
+
     def _rotation_decision(self, preview: bool = False) -> Optional[Decision]:
         combat = self._combat
+        selected_enemy = self._selected_enemy()
         for index, skill in enumerate(combat.GetSkills()):
             data = skill.custom_skill_data
             allegiance = int(data.TargetAllegiance)
@@ -242,9 +319,21 @@ class GameAdapter:
                 continue  # handled by the interrupt layer; other interrupt skills rotate normally
             if not combat.IsSkillReady(index):
                 continue
+            attacks_selected_target = allegiance in _PLAYER_TARGETED_ALLEGIANCES
+            if attacks_selected_target:
+                if selected_enemy == 0:
+                    continue  # no enemy selected in range: never pick a fight on our own
+                # Like HeroAI, only strict skills insist on the target kind: Agent.IsCaster/IsMartial go by weapon
+                # type, which many monsters lack, so a non-strict Backfire must still go on such a target.
+                strict = bool(data.Conditions.TargetingStrict)
+                if strict and not self._matches_target_kind(allegiance, selected_enemy):
+                    continue
+            elif not combat.in_aggro and not combat.IsOOCSkill(index):
+                continue  # out of combat only out-of-combat skills, like HeroAI (no buff spam while walking)
+            combat.is_targeting_enabled = not attacks_selected_target
             if preview and allegiance in _RESERVING_ALLEGIANCES:
                 # IsReadyToCast would reserve a cross-account lock: only check readiness and look the
-                # target up without reserving; the real (reserving) lookup happens on the key press.
+                # target up without reserving; the real (reserving) lookup happens on an actual play.
                 if not self._has_resources(skill.skill_id, int(skill.skillbar_data.adrenaline_a)):
                     continue
                 # ExploitableCorpse keeps target_id 0 ("alvo ao carregar"): GetNearestExploitableCorpse logs a
@@ -283,7 +372,7 @@ class GameAdapter:
         return choose_interrupt(self._enemy_casts(), self._interrupt_slots(), self._is_feasible, max_tier=max_tier)
 
     def rotation_after_build(self, blocked_skill_ids: Sequence[int]) -> Optional[Decision]:
-        """Rotation over the skills the build does not own (key-press path only)."""
+        """Rotation over the skills the build does not own (actual plays only, never the preview)."""
         self._sync_combat(blocked_skill_ids)
         return self._rotation_decision(preview=False)
 

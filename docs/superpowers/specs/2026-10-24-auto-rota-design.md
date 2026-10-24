@@ -8,11 +8,57 @@ Um widget em que o jogador carrega numa tecla e o personagem executa a
 **melhor jogada do momento**. Foco principal: interrupts de Mesmer, escolhidos
 por prioridade. O resto da rotação vem da lógica de combate do HeroAI.
 
-Cada toque na tecla faz **uma** jogada. O widget nunca age sozinho.
+> **Atualização (2026-10-24, depois do primeiro teste no jogo): modo interruptor.**
+> O modo "1 toque = 1 jogada" foi substituído a pedido do utilizador. O que esta
+> secção descreve prevalece sobre o resto do documento.
+>
+> - **A tecla liga e desliga** a Auto Rota (`next_auto_state` em
+>   `auto_rota_src/key_edge.py`). A tecla é lida diretamente do Windows
+>   (`GetAsyncKeyState`), com deteção de toque (`KeyEdge`). O `HOTKEY_MANAGER`
+>   do repositório passa códigos VK a `PyImGui.is_key_pressed`, que desde a
+>   migração do ImGui espera códigos ImGuiKey, e por isso nunca disparava.
+> - **Um toque só conta** com a janela do Guild Wars em primeiro plano
+>   (`PySystem.window.is_window_active()`) e sem o jogador a escrever. Um toque
+>   ignorado mostra o motivo na janela ("Ultimo toque ignorado").
+> - **Ligada, joga sozinha ao ritmo do personagem.** Em cada frame sem
+>   bloqueios (sem cast, sem derrube, 250 ms desde a última jogada), faz a
+>   melhor jogada: primeiro interrupts (em qualquer inimigo), depois a jogada da
+>   build (no modo build) e por fim a rotação. O histórico só regista as jogadas
+>   feitas.
+> - **Alvo:**
+>   - As skills de ataque (tipos de alvo inimigo, exceto interrupts) vão para o
+>     **alvo que o jogador selecionou**. Para isso, desliga-se
+>     `is_targeting_enabled` na instância privada do `CombatClass` só para essa
+>     skill; o HeroAI usa então `Player.GetTargetID()` e verifica as condições
+>     da skill nesse alvo.
+>   - Sem um inimigo vivo selecionado, as skills de ataque não são usadas. Fazem
+>     só interrupts e apoio, para nunca começar um combate sozinho.
+>   - Curas e skills no próprio jogador escolhem o alvo automaticamente.
+>   - Um alvo a mais do que o alcance de cast (`Range.Spellcast`) conta como "sem
+>     alvo": o `UseSkill` poria o personagem a andar até lá e anularia o
+>     movimento do jogador.
+>   - Skills só para casters, só para marciais ou só para inimigos derrubados
+>     verificam esse tipo no alvo selecionado. Esse filtro só existe no
+>     escolhedor de alvos do HeroAI, que aqui não é usado.
+>   - Exceção: com uma build detetada, a jogada da build escolhe o próprio alvo.
+> - **Ritmo:** além do tempo mínimo de 250 ms, não se junta nenhuma jogada
+>   enquanto a fila `ACTION` não estiver vazia. Isto evita acumular casts que
+>   continuariam a disparar depois de desligar.
+> - **Fora de combate**, só se usam skills de ataque no alvo selecionado e
+>   skills marcadas como "fora de combate" (`IsOOCSkill`), como no HeroAI. Assim
+>   não se gastam buffs enquanto se anda.
+> - **Uma build que dá erro desliga a Auto Rota**, em vez de repetir o erro em
+>   cada frame.
+> - **Desliga-se sozinha** quando o jogador morre, quando muda de mapa ou entra
+>   num outpost, quando o combate do HeroAI é ligado, quando o widget é
+>   desligado ou fica em pausa, e quando há uma exceção durante uma jogada.
+> - A janela mostra **LIGADA** (a verde) ou **DESLIGADA**, junto com a tecla.
+
+Texto original: cada toque na tecla faz **uma** jogada. O widget nunca age sozinho.
 
 ## Fora do âmbito
 
-- Modo contínuo ou "manter premida" (já existe: é o HeroAI em modo combate).
+- Modo "manter premida" (substituído pelo modo interruptor, acima).
 - Fila de toques: se o personagem estiver ocupado, o toque é ignorado.
 - Ataque automático com a arma quando não há skill útil.
 - Builds específicas escritas à mão (formato `BuildMgr`).

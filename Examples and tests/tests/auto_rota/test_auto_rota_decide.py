@@ -18,6 +18,7 @@ from Widgets.Automation.Helpers.AutoRota.auto_rota_src.decide import choose_inte
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.decide import classify  # noqa: E402
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.decide import is_eligible_build  # noqa: E402
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.key_edge import KeyEdge  # noqa: E402
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.key_edge import next_auto_state  # noqa: E402
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.model import BuildCandidate  # noqa: E402
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.model import CastKind  # noqa: E402
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.model import Decision  # noqa: E402
@@ -269,6 +270,31 @@ class KeyEdgeTests(unittest.TestCase):
 
     def test_key_already_down_at_start_does_not_fire(self) -> None:
         self.assert_events([True, True, False, True], [False, False, False, True], "held when widget starts")
+
+
+class AutoToggleTests(unittest.TestCase):
+    def assert_state(self, is_on: bool, pressed: bool, must_stop: bool, expected: bool) -> None:
+        observed = next_auto_state(is_on, pressed, must_stop)
+        self.assertEqual(
+            observed,
+            expected,
+            f"next_auto_state(is_on={is_on}, pressed={pressed}, must_stop={must_stop}) "
+            f"expected={expected} observed={observed}",
+        )
+
+    def test_press_turns_on(self) -> None:
+        self.assert_state(is_on=False, pressed=True, must_stop=False, expected=True)
+
+    def test_press_turns_off(self) -> None:
+        self.assert_state(is_on=True, pressed=True, must_stop=False, expected=False)
+
+    def test_no_press_keeps_state(self) -> None:
+        self.assert_state(is_on=True, pressed=False, must_stop=False, expected=True)
+        self.assert_state(is_on=False, pressed=False, must_stop=False, expected=False)
+
+    def test_must_stop_forces_off_even_when_pressed(self) -> None:
+        self.assert_state(is_on=True, pressed=False, must_stop=True, expected=False)
+        self.assert_state(is_on=False, pressed=True, must_stop=True, expected=False)
 
 
 if __name__ == "__main__":

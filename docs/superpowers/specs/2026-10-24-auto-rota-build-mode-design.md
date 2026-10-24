@@ -11,7 +11,9 @@ a lógica otimizada dessa build em vez da rotação genérica do HeroAI. A camad
 de interrupts da Auto Rota continua à frente, mas só para os casts mais
 importantes. Build de referência para desenho e testes: **Energy Surge**.
 
-Continua a valer a regra base: **um toque = no máximo uma skill**, e o widget
+Nota: desde o modo interruptor (ver a spec base), cada "jogada" descrita abaixo
+corre automaticamente enquanto a Auto Rota está ligada, em vez de a cada toque.
+O resto mantém-se. Regra original: **um toque = no máximo uma skill**, e o widget
 nunca age sozinho.
 
 ## Fora do âmbito
