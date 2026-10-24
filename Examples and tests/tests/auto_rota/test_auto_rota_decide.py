@@ -16,6 +16,8 @@ sys.path.insert(0, str(ROOT))
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.decide import can_hit  # noqa: E402
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.decide import choose_interrupt  # noqa: E402
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.decide import classify  # noqa: E402
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.decide import is_eligible_build  # noqa: E402
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.model import BuildCandidate  # noqa: E402
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.model import CastKind  # noqa: E402
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.model import Decision  # noqa: E402
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.model import EnemyCast  # noqa: E402
@@ -228,6 +230,28 @@ class ChooseInterruptTests(unittest.TestCase):
     def test_default_max_tier_allows_every_tier(self) -> None:
         observed = choose_interrupt([make_cast(agent_id=10)], [make_slot()], always)
         self.assert_choice(observed, 10, 500, "OTHER cast with default limit")
+
+
+class BuildEligibilityTests(unittest.TestCase):
+    def assert_eligible(self, candidate: BuildCandidate, expected: bool) -> None:
+        observed = is_eligible_build(candidate)
+        self.assertEqual(observed, expected, f"is_eligible_build({candidate}) expected={expected} observed={observed}")
+
+    def test_regular_mesmer_build_is_eligible(self) -> None:
+        candidate = BuildCandidate(primary_is_mesmer=True, is_fallback_candidate=False, overrides_skill_casting=False)
+        self.assert_eligible(candidate, True)
+
+    def test_fallback_candidate_is_rejected(self) -> None:
+        candidate = BuildCandidate(primary_is_mesmer=True, is_fallback_candidate=True, overrides_skill_casting=False)
+        self.assert_eligible(candidate, False)
+
+    def test_other_profession_is_rejected(self) -> None:
+        candidate = BuildCandidate(primary_is_mesmer=False, is_fallback_candidate=False, overrides_skill_casting=False)
+        self.assert_eligible(candidate, False)
+
+    def test_build_overriding_skill_casting_is_rejected(self) -> None:
+        candidate = BuildCandidate(primary_is_mesmer=True, is_fallback_candidate=False, overrides_skill_casting=True)
+        self.assert_eligible(candidate, False)
 
 
 if __name__ == "__main__":

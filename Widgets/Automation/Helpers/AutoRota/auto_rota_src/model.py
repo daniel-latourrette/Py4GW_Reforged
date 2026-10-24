@@ -51,3 +51,10 @@ class Decision:
     target_id: int
     label: str
     enemy_skill_id: int = 0  # 0 = no enemy cast (rotation play)
+
+
+@dataclass(frozen=True)
+class BuildCandidate:
+    primary_is_mesmer: bool
+    is_fallback_candidate: bool  # e.g. the generic HeroAI build GetBestBuild returns when nothing matches
+    overrides_skill_casting: bool  # e.g. farm builds with their own multi-cast ProcessSkillCasting

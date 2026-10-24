@@ -9,6 +9,7 @@ from typing import Callable
 from typing import Optional
 from typing import Sequence
 
+from .model import BuildCandidate
 from .model import CastKind
 from .model import Decision
 from .model import EnemyCast
@@ -81,3 +82,10 @@ def choose_interrupt(
                     enemy_skill_id=cast.skill_id,
                 )
     return None
+
+
+def is_eligible_build(candidate: BuildCandidate) -> bool:
+    """A build can drive one key press only if it is a regular Mesmer combat build."""
+    return (
+        candidate.primary_is_mesmer and not candidate.is_fallback_candidate and not candidate.overrides_skill_casting
+    )
