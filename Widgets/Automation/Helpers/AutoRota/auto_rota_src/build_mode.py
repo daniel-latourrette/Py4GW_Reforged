@@ -58,6 +58,7 @@ class BuildMode:
         self._pass: Optional[Generator[Any, Any, Any]] = None
         self._pass_started_s: float = 0.0
         self._pending: bool = False
+        self._pending_since_s: float = 0.0
 
     @property
     def build_name(self) -> Optional[str]:
@@ -65,7 +66,8 @@ class BuildMode:
 
     @property
     def busy(self) -> bool:
-        return self._pending or self._pass is not None
+        pending = self._pending and time.monotonic() - self._pending_since_s <= _PASS_TIMEOUT_S
+        return pending or self._pass is not None
 
     def blocked_skill_ids(self) -> list[int]:
         """Skills owned by the active build; the rotation after a pass must not cast them."""
@@ -98,6 +100,7 @@ class BuildMode:
 
     def request_pass(self) -> None:
         self._pending = True
+        self._pending_since_s = time.monotonic()
 
     def advance(self) -> Optional[BuildPassOutcome]:
         """Call once per frame. Returns an outcome when a pass finishes, else None."""
@@ -105,6 +108,8 @@ class BuildMode:
             if not self._pending:
                 return None
             self._pending = False
+            if time.monotonic() - self._pending_since_s > _PASS_TIMEOUT_S:
+                return None  # stale request (widget was not ticking); drop it silently
             if self._build is None:
                 return BuildPassOutcome(cast=None)
             self._build.last_cast = None
@@ -122,7 +127,11 @@ class BuildMode:
 
     def _finish(self, error: Optional[str]) -> BuildPassOutcome:
         if self._pass is not None:
-            self._pass.close()
-        self._pass = None
+            try:
+                self._pass.close()
+            except Exception as exc:
+                error = error or f"close: {exc}"
+            finally:
+                self._pass = None
         cast = self._build.last_cast if self._build is not None else None
         return BuildPassOutcome(cast=cast, error=error)
