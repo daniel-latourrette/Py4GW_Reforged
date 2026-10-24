@@ -53,6 +53,18 @@ por prioridade. O resto da rotação vem da lógica de combate do HeroAI.
 >   num outpost, quando o combate do HeroAI é ligado, quando o widget é
 >   desligado ou fica em pausa, e quando há uma exceção durante uma jogada.
 > - A janela mostra **LIGADA** (a verde) ou **DESLIGADA**, junto com a tecla.
+> - **Tecla de buffs** (F2 por defeito, configurável e guardada em
+>   `buff_hotkey`):
+>   - Liga e desliga o uso de skills com `Nature` Buff, EnergyBuff ou
+>     SelfTargeted (por exemplo Mantras, Channeling, Ether Signet, Arcane Echo,
+>     Keystone Signet). Com os buffs desligados, a rotação nunca as usa.
+>   - Começa sempre desligada.
+>   - Só filtra: quem joga continua a ser a tecla principal.
+>   - Não se desliga com mudanças de mapa ou com a morte.
+>   - Tem os mesmos filtros de foco e de escrita da tecla principal.
+>   - Se for igual à tecla principal, é ignorada e aparece um aviso.
+>   - Com uma build detetada, os buffs que pertencem à build são decididos pela
+>     build.
 
 Texto original: cada toque na tecla faz **uma** jogada. O widget nunca age sozinho.
 

@@ -109,6 +109,15 @@ _PLAYER_TARGETED_ALLEGIANCES: frozenset[int] = frozenset(
     }
 )
 
+# Skills the player's buff toggle controls (e.g. Mantras, Channeling, Ether Signet, Arcane Echo).
+_BUFF_NATURES: frozenset[int] = frozenset(
+    {
+        SkillNature.Buff.value,
+        SkillNature.EnergyBuff.value,
+        SkillNature.SelfTargeted.value,
+    }
+)
+
 _MARTIAL_ALLEGIANCES: frozenset[int] = frozenset(
     {
         Skilltarget.EnemyMartial.value,
@@ -309,7 +318,7 @@ class GameAdapter:
             return Agent.IsKnockedDown(target_id)
         return True
 
-    def _rotation_decision(self, preview: bool = False) -> Optional[Decision]:
+    def _rotation_decision(self, preview: bool = False, allow_buffs: bool = True) -> Optional[Decision]:
         combat = self._combat
         selected_enemy = self._selected_enemy()
         for index, skill in enumerate(combat.GetSkills()):
@@ -317,6 +326,8 @@ class GameAdapter:
             allegiance = int(data.TargetAllegiance)
             if data.Nature == SkillNature.Interrupt.value and allegiance in _REACH_BY_ALLEGIANCE:
                 continue  # handled by the interrupt layer; other interrupt skills rotate normally
+            if not allow_buffs and data.Nature in _BUFF_NATURES:
+                continue  # the player's buff toggle is off
             if not combat.IsSkillReady(index):
                 continue
             attacks_selected_target = allegiance in _PLAYER_TARGETED_ALLEGIANCES
@@ -359,22 +370,22 @@ class GameAdapter:
             )
         return None
 
-    def next_decision(self, preview: bool = False) -> Optional[Decision]:
+    def next_decision(self, preview: bool = False, allow_buffs: bool = True) -> Optional[Decision]:
         self._sync_combat()
         interrupt = choose_interrupt(self._enemy_casts(), self._interrupt_slots(), self._is_feasible)
         if interrupt is not None:
             return interrupt
-        return self._rotation_decision(preview)
+        return self._rotation_decision(preview, allow_buffs)
 
     def interrupt_decision(self, max_tier: Tier) -> Optional[Decision]:
         """Interrupt layer only (build mode): no rotation fallback, never reserves targets."""
         self._sync_combat()
         return choose_interrupt(self._enemy_casts(), self._interrupt_slots(), self._is_feasible, max_tier=max_tier)
 
-    def rotation_after_build(self, blocked_skill_ids: Sequence[int]) -> Optional[Decision]:
+    def rotation_after_build(self, blocked_skill_ids: Sequence[int], allow_buffs: bool = True) -> Optional[Decision]:
         """Rotation over the skills the build does not own (actual plays only, never the preview)."""
         self._sync_combat(blocked_skill_ids)
-        return self._rotation_decision(preview=False)
+        return self._rotation_decision(preview=False, allow_buffs=allow_buffs)
 
     def note_external_cast(self) -> None:
         """Start the debounce after a cast queued outside execute() (e.g. by a build pass)."""

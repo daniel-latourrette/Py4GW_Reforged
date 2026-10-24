@@ -34,6 +34,7 @@ MODULE_ICON = "Assets/Textures/Module_Icons/Combat.png"
 
 _SETTINGS_SECTION = "AutoRota"
 _SETTINGS_HOTKEY = "hotkey"
+_SETTINGS_BUFF_HOTKEY = "buff_hotkey"
 _PREVIEW_INTERVAL_MS = 100
 _HISTORY_SIZE = 5
 _HEARTBEAT_MAX_S = 0.5
@@ -61,8 +62,11 @@ _history: deque[str] = deque(maxlen=_HISTORY_SIZE)
 _key_loaded = False
 _key_index = 0
 _key_edge = KeyEdge()
+_buff_key_index = 2
+_buff_key_edge = KeyEdge()
 _ignored_text = ""
 _auto_on = False
+_buffs_on = False  # always starts off: buffs are an explicit opt-in per session
 _main_tick_s = 0.0
 _logged_errors: set[str] = set()
 
@@ -85,12 +89,12 @@ def _push_history(text: str) -> None:
     _history.appendleft(f"{time.strftime('%H:%M:%S')}  {text}")
 
 
-def _load_key_index() -> int:
-    saved = _settings.get_str(_SETTINGS_SECTION, _SETTINGS_HOTKEY, Key.VK_OEM_3.name)
+def _load_key_index(setting: str, default: Key) -> int:
+    saved = _settings.get_str(_SETTINGS_SECTION, setting, default.name)
     for index, (_, key) in enumerate(_KEY_CHOICES):
         if key.name == saved:
             return index
-    return 0
+    return next(index for index, (_, key) in enumerate(_KEY_CHOICES) if key is default)
 
 
 def _is_key_down(vk_code: int) -> bool:
@@ -122,12 +126,26 @@ def _stop_reason() -> Optional[str]:
     return reason if reason in STOP_REASONS else None
 
 
-def _on_toggle_press() -> None:
+def _press_allowed() -> bool:
     if not PySystem.window.is_window_active():
         _ignore_press("Guild Wars sem foco")
-        return
+        return False
     if Player.IsTyping() or PyImGui.get_io().want_text_input:
         _ignore_press("a escrever (chat ou campo de texto)")
+        return False
+    return True
+
+
+def _on_buff_toggle_press() -> None:
+    global _buffs_on
+    if not _press_allowed():
+        return
+    _buffs_on = not _buffs_on
+    _push_history("Buffs LIGADOS" if _buffs_on else "Buffs DESLIGADOS")
+
+
+def _on_toggle_press() -> None:
+    if not _press_allowed():
         return
     stop_reason = _stop_reason()
     turning_on = not _auto_on
@@ -141,7 +159,7 @@ def _play_once() -> None:
     if _build_mode.busy or _adapter.blocker() is not None:
         return
     if _build_mode.build_name is None:
-        decision = _adapter.next_decision()
+        decision = _adapter.next_decision(allow_buffs=_buffs_on)
         if decision is not None:
             _adapter.execute(decision)
             _push_history(_adapter.describe(decision))
@@ -169,7 +187,7 @@ def _finish_build_pass(outcome: BuildPassOutcome) -> None:
         return
     if outcome.cast is not None or not _auto_on or _adapter.blocker() is not None:
         return
-    decision = _adapter.rotation_after_build(_build_mode.blocked_skill_ids())
+    decision = _adapter.rotation_after_build(_build_mode.blocked_skill_ids(), allow_buffs=_buffs_on)
     if decision is not None:
         _adapter.execute(decision)
         _push_history(_adapter.describe(decision))
@@ -183,7 +201,7 @@ def _update_preview() -> None:
         _preview_text = f"em pausa ({reason})"
         return
     if _build_mode.build_name is None:
-        decision = _adapter.next_decision(preview=True)
+        decision = _adapter.next_decision(preview=True, allow_buffs=_buffs_on)
         _preview_text = _adapter.describe(decision) if decision is not None else "nada a fazer"
         return
     interrupt = _adapter.interrupt_decision(BUILD_MODE_MAX_TIER)
@@ -191,7 +209,7 @@ def _update_preview() -> None:
 
 
 def _draw_window() -> None:
-    global _key_index, _key_edge
+    global _key_index, _key_edge, _buff_key_index, _buff_key_edge
     opened = PyImGui.begin(MODULE_NAME, int(PyImGui.WindowFlags.AlwaysAutoResize))
     try:
         if opened:
@@ -200,6 +218,11 @@ def _draw_window() -> None:
                 PyImGui.text_colored(f"LIGADA  ({key_label} para desligar)", _ON_COLOR)
             else:
                 PyImGui.text(f"DESLIGADA  ({key_label} para ligar)")
+            buff_label = _KEY_CHOICES[_buff_key_index][0]
+            if _buffs_on:
+                PyImGui.text_colored(f"Buffs: LIGADOS  ({buff_label})", _ON_COLOR)
+            else:
+                PyImGui.text(f"Buffs: DESLIGADOS  ({buff_label})")
             if _heroai_conflict:
                 PyImGui.text_colored("HeroAI com combate ligado: Auto Rota em pausa", _WARNING_COLOR)
             build_name = _build_mode.build_name
@@ -212,6 +235,13 @@ def _draw_window() -> None:
                 _key_index = new_index
                 _settings.set_str(_SETTINGS_SECTION, _SETTINGS_HOTKEY, _KEY_CHOICES[new_index][1].name)
                 _key_edge = KeyEdge()
+            new_buff_index = PyImGui.combo("Tecla buffs", _buff_key_index, labels)
+            if new_buff_index != _buff_key_index:
+                _buff_key_index = new_buff_index
+                _settings.set_str(_SETTINGS_SECTION, _SETTINGS_BUFF_HOTKEY, _KEY_CHOICES[new_buff_index][1].name)
+                _buff_key_edge = KeyEdge()
+            if _buff_key_index == _key_index:
+                PyImGui.text_colored("As duas teclas sao iguais: a tecla dos buffs e ignorada", _WARNING_COLOR)
             if _ignored_text:
                 PyImGui.text(f"Ultimo toque ignorado: {_ignored_text}")
             PyImGui.separator()
@@ -234,6 +264,7 @@ def tooltip() -> None:
     PyImGui.text("Ataque e hexes vao para o alvo que selecionares (ao alcance); sem alvo, nao ataca.")
     PyImGui.text("Excecao: com build detetada, a jogada da build escolhe o proprio alvo.")
     PyImGui.text("Desliga ao morrer, mudar de mapa ou ligar o combate do HeroAI.")
+    PyImGui.text("A tecla dos buffs liga/desliga o uso de buffs (Mantras, Channeling, Ether Signet...).")
     PyImGui.end_tooltip()
 
 
@@ -244,7 +275,7 @@ def on_disable() -> None:
 
 
 def main() -> None:
-    global _key_index, _key_loaded, _main_tick_s, _preview_text
+    global _key_index, _buff_key_index, _key_loaded, _main_tick_s, _preview_text
     try:
         if not Routines.Checks.Map.MapValid():
             _set_auto(False, "mudanca de mapa")
@@ -260,7 +291,8 @@ def main() -> None:
             _build_mode.cancel()  # main() was not ticking (pause, load, stall): never resume an old pass
         _main_tick_s = time.monotonic()
         if not _key_loaded:
-            _key_index = _load_key_index()
+            _key_index = _load_key_index(_SETTINGS_HOTKEY, Key.VK_OEM_3)
+            _buff_key_index = _load_key_index(_SETTINGS_BUFF_HOTKEY, Key.VK_F2)
             _key_loaded = True
         try:
             _build_mode.refresh()
@@ -272,6 +304,13 @@ def main() -> None:
             except Exception as exc:
                 _push_history(f"erro: {exc}")
                 _log_error("key press", exc)
+        buff_key_down = _buff_key_index != _key_index and _is_key_down(_KEY_CHOICES[_buff_key_index][1].value)
+        if _buff_key_edge.update(buff_key_down):
+            try:
+                _on_buff_toggle_press()
+            except Exception as exc:
+                _push_history(f"erro: {exc}")
+                _log_error("buff key press", exc)
         if _auto_on:
             stop_reason = _stop_reason()
             if stop_reason is not None:
