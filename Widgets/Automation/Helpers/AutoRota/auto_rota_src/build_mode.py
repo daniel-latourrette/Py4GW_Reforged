@@ -117,7 +117,7 @@ class BuildMode:
         """Call once per frame. Returns an outcome when a pass finishes, else None."""
         if self._pass is not None:
             if time.monotonic() - self._pass_started_s > _PASS_TIMEOUT_S:
-                return self._finish(None)  # stale pass (widget was not ticking); do not step it again
+                return self._finish(None)  # deadline passed; do not step it again
         else:
             if not self._pending:
                 return None

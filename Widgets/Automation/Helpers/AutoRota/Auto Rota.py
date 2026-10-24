@@ -219,6 +219,8 @@ def main() -> None:
         if not (Routines.Checks.Map.IsMapReady() and Routines.Checks.Party.IsPartyLoaded()):
             _build_mode.cancel()
             return
+        if time.monotonic() - _main_tick_s > _HEARTBEAT_MAX_S:
+            _build_mode.cancel()  # main() was not ticking (pause, load, stall): never resume an old pass
         _main_tick_s = time.monotonic()
         if not _hotkey_registered:
             _key_index = _load_key_index()
