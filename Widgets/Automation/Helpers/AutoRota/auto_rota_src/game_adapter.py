@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import time
 from typing import Optional
+from typing import Sequence
 
 from Py4GWCoreLib import GLOBAL_CACHE
 from Py4GWCoreLib import Agent
@@ -41,6 +42,7 @@ from .model import EnemyCast
 from .model import InterruptReach
 from .model import InterruptSlot
 from .priorities import HEALING_ATTRIBUTE_NAMES
+from .priorities import Tier
 
 LOG_SENDER = "Auto Rota"
 
@@ -111,11 +113,12 @@ class GameAdapter:
         self._last_execute_s: float = 0.0
         self._logged_failures: set[tuple[int, int]] = set()
 
-    def _sync_combat(self) -> CombatClass:
+    def _sync_combat(self, blocked_skill_ids: Sequence[int] = ()) -> CombatClass:
         """Rebuild the private CombatClass from the live skillbar right before a decision."""
         combat = self._combat
         combat.Update(self._cached_data)
         combat.PrioritizeSkills()
+        combat.ApplyBlockedSkillIDs(list(blocked_skill_ids))
         combat.is_skill_enabled = [True] * MAX_SKILLS
         combat.is_targeting_enabled = True
         return combat
@@ -274,13 +277,27 @@ class GameAdapter:
             return interrupt
         return self._rotation_decision(preview)
 
+    def interrupt_decision(self, max_tier: Tier) -> Optional[Decision]:
+        """Interrupt layer only (build mode): no rotation fallback, never reserves targets."""
+        self._sync_combat()
+        return choose_interrupt(self._enemy_casts(), self._interrupt_slots(), self._is_feasible, max_tier=max_tier)
+
+    def rotation_after_build(self, blocked_skill_ids: Sequence[int]) -> Optional[Decision]:
+        """Rotation over the skills the build does not own (key-press path only)."""
+        self._sync_combat(blocked_skill_ids)
+        return self._rotation_decision(preview=False)
+
+    def note_external_cast(self) -> None:
+        """Start the debounce after a cast queued outside execute() (e.g. by a build pass)."""
+        self._last_execute_s = time.monotonic()
+
     def execute(self, decision: Decision) -> None:
         GLOBAL_CACHE.SkillBar.UseSkill(decision.bar_slot, decision.target_id, aftercast_delay=_AFTERCAST_MS)
         self._last_execute_s = time.monotonic()
 
-    def describe(self, decision: Decision) -> str:
+    def describe(self, decision: Decision, no_target_text: str = "(alvo ao carregar)") -> str:
         if decision.target_id == 0:
-            target_name = "(alvo ao carregar)"
+            target_name = no_target_text
         else:
             target_name = Agent.GetNameByID(decision.target_id) or f"agente {decision.target_id}"
         text = f"{_skill_name(decision.skill_id)} -> {target_name}"
