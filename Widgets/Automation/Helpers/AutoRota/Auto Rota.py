@@ -120,16 +120,18 @@ def _on_hotkey() -> None:
 
 
 def _finish_build_pass(outcome: BuildPassOutcome) -> None:
-    if outcome.error is not None:
-        _push_history(f"erro: {outcome.error}")
-        ConsoleLog(MODULE_NAME, f"build pass: {outcome.error}", Console.MessageType.Error)
-        return
+    # A pass can fail after it already queued a skill: record that cast (and start the debounce) first.
     if outcome.cast is not None:
         skill_id, target_id = outcome.cast
         _adapter.note_external_cast()
         label = f"Build: {_build_mode.build_name or '?'}"
         cast = Decision(bar_slot=0, skill_id=skill_id, target_id=target_id, label=label)
         _push_history(_adapter.describe(cast, no_target_text="(sem alvo)"))
+    if outcome.error is not None:
+        _push_history(f"erro: {outcome.error}")
+        ConsoleLog(MODULE_NAME, f"build pass: {outcome.error}", Console.MessageType.Error)
+        return
+    if outcome.cast is not None:
         return
     reason = _adapter.blocker()
     if reason is not None:
@@ -196,6 +198,7 @@ def tooltip() -> None:
     PyImGui.separator()
     PyImGui.text("Cada toque na tecla faz uma jogada:")
     PyImGui.bullet_text("1. Interrupt por prioridade (ressurreicao, cura, elite, cast longo)")
+    PyImGui.bullet_text("   (com build detetada: so ressurreicao, cura e elite)")
     PyImGui.bullet_text("2. Senao, a jogada da build de Mesmer detetada, se houver")
     PyImGui.bullet_text("3. Senao, a proxima skill da rotacao do HeroAI")
     PyImGui.text("Nao funciona com o combate do HeroAI ligado.")

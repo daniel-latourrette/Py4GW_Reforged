@@ -25,7 +25,7 @@ nunca age sozinho.
 
 ## Deteção da build
 
-- A Auto Rota tem o seu próprio `BuildRegistry()` (`Py4GWCoreLib/BuildMgr.py:2112`).
+- A Auto Rota tem o seu próprio `BuildRegistry()` (`Py4GWCoreLib/BuildMgr.py`, classe `BuildRegistry`).
 - No `main()` do widget, calcula a assinatura da barra (profissão primária,
   secundária e as 8 skills). Só quando a assinatura muda é que resolve a build
   com `registry.GetBestBuild(primary, secondary, skills)` e cria a instância
@@ -67,7 +67,7 @@ Junta-se uma nova razão de "ocupado": está uma passagem da build a decorrer.
    pedida". Não corre a build ali, porque as esperas da build contam tempo real
    e travariam o frame do widget que trata as teclas.
 3. **Passagem da build (no `main()` do widget, ao longo de vários frames).**
-   - No frame seguinte, o widget cria o gerador `build.ProcessSkillCasting()`
+   - No próximo `main()` do widget (que pode ser ainda no mesmo frame), cria-se o gerador `build.ProcessSkillCasting()`
      e limpa o registo da última skill lançada.
    - Avança o gerador com um `next()` por frame.
    - A passagem acaba quando o gerador termina ou ao fim de 500 ms. No
@@ -151,9 +151,13 @@ nunca na pré-visualização:
 ## Erros
 
 - Exceção ao resolver a build: fica "Build: nenhuma" e o erro é registado uma
-  vez. A Auto Rota continua no modo genérico.
+  vez. A Auto Rota continua no modo genérico. A resolução só é tentada outra vez
+  quando a barra muda (ou ao recarregar o widget), para não repetir o erro em
+  cada frame.
 - Exceção a meio da passagem: o gerador é fechado, o histórico mostra
-  `erro: ...` e o erro vai para a consola.
+  `erro: ...` e o erro vai para a consola. Se a build já tinha posto uma skill
+  na fila antes do erro, essa jogada é registada no histórico e conta para o
+  tempo mínimo entre jogadas.
 - O timeout de 500 ms fecha a passagem sem erro. Se nada foi lançado, segue-se
   a rotação.
 
@@ -169,16 +173,32 @@ nunca na pré-visualização:
 - **Pyright:** 0 erros na pasta da Auto Rota, nos testes e em `BuildMgr.py`
   (sem erros novos).
 - **No jogo**, com a barra Energy Surge (Air of Superiority, Energy Surge, EVAS
-  e Cry of Frustration, mais Power Drain):
+  e Cry of Frustration, mais Power Drain). No painel do HeroAI, o combate tem
+  de estar desligado e todas as skills ligadas: a build respeita as skills
+  desligadas lá, mas os interrupts e a rotação da Auto Rota não. Na primeira
+  deteção pode haver uma pequena pausa, enquanto se carregam as builds.
   1. A janela mostra `Build: Energy Surge`.
   2. Um Monk inimigo a curar é interrompido pela Auto Rota
      (`[Interrupt: Cura]`).
   3. Um inimigo a fazer cast de algo pouco importante: a Auto Rota não
-     interrompe, e a build pode usar o Cry of Frustration (`[Build: Energy Surge]`).
-  4. Sem casts inimigos, perto de inimigos: sai Energy Surge ou Air of
-     Superiority pela build.
-  5. Uma skill fora da build (por exemplo uma skill de PvE extra) só sai pela
-     rotação, quando a build não tem nada para fazer.
+     interrompe. A build segue a ordem dela:
+     1. Air of Superiority;
+     2. Power Drain (energia até 30% e inimigo a fazer cast de spell ou chant);
+     3. EVAS;
+     4. Energy Surge;
+     5. Cry of Frustration.
+
+     Por isso o mais provável é sair EVAS ou Energy Surge. O Cry of
+     Frustration só sai se esses estiverem a recarregar (`[Build: Energy Surge]`).
+  4. Sem casts inimigos, perto de inimigos: sai Air of Superiority, EVAS ou
+     Energy Surge pela build. Fora de combate só pode sair o Air of Superiority;
+     senão aparece "nada a fazer".
+  5. Rotação para skills fora da build: com a barra acima todas as skills
+     pertencem à build. Para testar este caso, pôr num slot livre uma skill que
+     a build não conheça (que não seja Mistrust, Cry of Pain, Unnatural Signet,
+     Shatter Hex, Overload, Flesh of My Flesh nem Breath of the Great Dwarf).
+     Essa skill só sai pela rotação (`[Rotacao]`), quando a build não tem nada
+     para fazer.
   6. Carregar várias vezes muito depressa: no máximo uma skill por toque, e
      "ocupado" durante a passagem.
   7. Trocar uma skill obrigatória da build: a janela passa a
