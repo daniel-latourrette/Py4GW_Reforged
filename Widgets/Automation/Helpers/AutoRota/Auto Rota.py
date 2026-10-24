@@ -17,8 +17,12 @@ from Py4GWCoreLib.HotkeyManager import HOTKEY_MANAGER
 from Py4GWCoreLib.py4gwcorelib_src.Console import Console
 from Py4GWCoreLib.py4gwcorelib_src.Console import ConsoleLog
 from Py4GWCoreLib.py4gwcorelib_src.Settings import Settings
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.build_mode import BuildMode
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.build_mode import BuildPassOutcome
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.game_adapter import REASON_BUSY
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.game_adapter import GameAdapter
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.model import Decision
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.priorities import BUILD_MODE_MAX_TIER
 
 MODULE_NAME = "Auto Rota"
 MODULE_ICON = "Assets/Textures/Module_Icons/Combat.png"
@@ -42,6 +46,7 @@ _KEY_CHOICES: list[tuple[str, Key]] = [
 
 _cached_data = CacheData()
 _adapter = GameAdapter(_cached_data)
+_build_mode = BuildMode()
 _settings = Settings("Widgets/Config/auto_rota.ini", "global")
 _preview_timer = Timer()
 _preview_timer.Start()
@@ -88,19 +93,50 @@ def _on_hotkey() -> None:
             return  # widget paused, loading, or main() not running
         if Player.IsTyping() or PyImGui.get_io().want_text_input:
             return
+        if _build_mode.busy:
+            _push_history(f"recusado: {REASON_BUSY}")
+            return
         reason = _adapter.blocker()
         if reason is not None:
             _push_history(f"recusado: {reason}")
             return
-        decision = _adapter.next_decision()
-        if decision is None:
-            _push_history("nada a fazer")
+        if _build_mode.build_name is None:
+            decision = _adapter.next_decision()
+            if decision is None:
+                _push_history("nada a fazer")
+                return
+            _adapter.execute(decision)
+            _push_history(_adapter.describe(decision))
             return
-        _adapter.execute(decision)
-        _push_history(_adapter.describe(decision))
+        interrupt = _adapter.interrupt_decision(BUILD_MODE_MAX_TIER)
+        if interrupt is not None:
+            _adapter.execute(interrupt)
+            _push_history(_adapter.describe(interrupt))
+            return
+        _build_mode.request_pass()  # the widget's main() drives the pass over the next frames
     except Exception as exc:
         _push_history(f"erro: {exc}")
         _log_error("hotkey", exc)
+
+
+def _finish_build_pass(outcome: BuildPassOutcome) -> None:
+    if outcome.error is not None:
+        _push_history(f"erro: {outcome.error}")
+        ConsoleLog(MODULE_NAME, f"build pass: {outcome.error}", Console.MessageType.Error)
+        return
+    if outcome.cast is not None:
+        skill_id, target_id = outcome.cast
+        _adapter.note_external_cast()
+        label = f"Build: {_build_mode.build_name or '?'}"
+        cast = Decision(bar_slot=0, skill_id=skill_id, target_id=target_id, label=label)
+        _push_history(_adapter.describe(cast, no_target_text="(sem alvo)"))
+        return
+    decision = _adapter.rotation_after_build(_build_mode.blocked_skill_ids())
+    if decision is None:
+        _push_history("nada a fazer")
+        return
+    _adapter.execute(decision)
+    _push_history(_adapter.describe(decision))
 
 
 def _register_hotkey() -> None:
@@ -117,8 +153,14 @@ def _update_preview() -> None:
     if reason is not None and reason != REASON_BUSY:
         _preview_text = f"em pausa ({reason})"
         return
-    decision = _adapter.next_decision(preview=True)
-    _preview_text = _adapter.describe(decision) if decision is not None else "nada a fazer"
+    if _build_mode.build_name is None:
+        decision = _adapter.next_decision(preview=True)
+        _preview_text = _adapter.describe(decision) if decision is not None else "nada a fazer"
+        return
+    interrupt = _adapter.interrupt_decision(BUILD_MODE_MAX_TIER)
+    _preview_text = (
+        _adapter.describe(interrupt) if interrupt is not None else "jogada da build (decidida ao carregar)"
+    )
 
 
 def _draw_window() -> None:
@@ -128,6 +170,8 @@ def _draw_window() -> None:
         if opened:
             if _heroai_conflict:
                 PyImGui.text_colored("HeroAI com combate ligado: Auto Rota em pausa", _WARNING_COLOR)
+            build_name = _build_mode.build_name
+            PyImGui.text(f"Build: {build_name}" if build_name else "Build: nenhuma (rotacao generica)")
             PyImGui.text(f"Proxima jogada: {_preview_text}")
             PyImGui.separator()
             labels = [label for label, _ in _KEY_CHOICES]
@@ -150,7 +194,8 @@ def tooltip() -> None:
     PyImGui.separator()
     PyImGui.text("Cada toque na tecla faz uma jogada:")
     PyImGui.bullet_text("1. Interrupt por prioridade (ressurreicao, cura, elite, cast longo)")
-    PyImGui.bullet_text("2. Senao, a proxima skill da rotacao do HeroAI")
+    PyImGui.bullet_text("2. Senao, a jogada da build de Mesmer detetada, se houver")
+    PyImGui.bullet_text("3. Senao, a proxima skill da rotacao do HeroAI")
     PyImGui.text("Nao funciona com o combate do HeroAI ligado.")
     PyImGui.end_tooltip()
 
@@ -173,6 +218,13 @@ def main() -> None:
         if not _hotkey_registered:
             _key_index = _load_key_index()
             _register_hotkey()
+        try:
+            _build_mode.refresh()
+        except Exception as exc:
+            _log_error_once("build", exc)
+        outcome = _build_mode.advance()
+        if outcome is not None:
+            _finish_build_pass(outcome)
         if _preview_timer.HasElapsed(_PREVIEW_INTERVAL_MS):
             _preview_timer.Reset()
             try:
