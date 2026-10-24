@@ -211,10 +211,19 @@ class ChooseInterruptTests(unittest.TestCase):
         observed = choose_interrupt(casts, [make_slot()], always, max_tier=Tier.ELITE)
         self.assert_choice(observed, None, None, "only long-cast and other casts, limit ELITE")
 
-    def test_max_tier_keeps_casts_within_the_limit(self) -> None:
+    def test_max_tier_blocks_fall_through_to_lower_tiers(self) -> None:
         casts = [make_cast(agent_id=10, activation_ms=3000), make_cast(agent_id=20, is_healing=True)]
+
+        def not_agent_20(_slot: InterruptSlot, cast: EnemyCast) -> bool:
+            return cast.agent_id != 20
+
+        observed = choose_interrupt(casts, [make_slot()], not_agent_20, max_tier=Tier.ELITE)
+        self.assert_choice(observed, None, None, "healing infeasible, long cast above limit ELITE must not be picked")
+
+    def test_max_tier_includes_casts_at_the_limit(self) -> None:
+        casts = [make_cast(agent_id=20, remaining_ms=100), make_cast(agent_id=10, is_elite=True, remaining_ms=900)]
         observed = choose_interrupt(casts, [make_slot()], always, max_tier=Tier.ELITE)
-        self.assert_choice(observed, 20, 500, "healing within limit ELITE")
+        self.assert_choice(observed, 10, 500, "elite cast at limit ELITE beats an earlier-finishing OTHER cast")
 
     def test_default_max_tier_allows_every_tier(self) -> None:
         observed = choose_interrupt([make_cast(agent_id=10)], [make_slot()], always)
