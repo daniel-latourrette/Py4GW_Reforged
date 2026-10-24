@@ -65,6 +65,16 @@ por prioridade. O resto da rotação vem da lógica de combate do HeroAI.
 >   - Se for igual à tecla principal, é ignorada e aparece um aviso.
 >   - Com uma build detetada, os buffs que pertencem à build são decididos pela
 >     build.
+> - **Builds sugeridas:** uma secção recolhível na janela lista as builds que o
+>   modo build consegue usar (`BuildMode.suggested_builds()`). São as builds de
+>   Mesmer elegíveis e com template real; a de farm fica de fora. Cada uma tem:
+>   - **Copiar:** põe o código do template na área de transferência.
+>   - **Carregar:** aplica o template à barra com
+>     `Routines.Yield.Skills.LoadSkillbar`, um passo por frame.
+>     - Só funciona em outpost.
+>     - Tem um limite de 10 s e é cancelado se o mapa mudar.
+>     - Substitui a barra, incluindo skills e atributos.
+>     - A deteção da build confirma o resultado ("Build: <nome>").
 
 Texto original: cada toque na tecla faz **uma** jogada. O widget nunca age sozinho.
 

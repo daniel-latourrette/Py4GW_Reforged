@@ -6,6 +6,8 @@ import ctypes
 import time
 import traceback
 from collections import deque
+from collections.abc import Generator
+from typing import Any
 from typing import Optional
 
 import PyImGui
@@ -21,6 +23,7 @@ from Py4GWCoreLib.py4gwcorelib_src.Console import ConsoleLog
 from Py4GWCoreLib.py4gwcorelib_src.Settings import Settings
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.build_mode import BuildMode
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.build_mode import BuildPassOutcome
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.build_mode import SuggestedBuild
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.game_adapter import REASON_BUSY
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.game_adapter import STOP_REASONS
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.game_adapter import GameAdapter
@@ -38,6 +41,7 @@ _SETTINGS_BUFF_HOTKEY = "buff_hotkey"
 _PREVIEW_INTERVAL_MS = 100
 _HISTORY_SIZE = 5
 _HEARTBEAT_MAX_S = 0.5
+_LOAD_TIMEOUT_S = 10.0
 _LOGGED_ERRORS_MAX = 64
 _WARNING_COLOR = (1.0, 0.35, 0.35, 1.0)
 _ON_COLOR = (0.35, 1.0, 0.45, 1.0)
@@ -67,6 +71,9 @@ _buff_key_edge = KeyEdge()
 _ignored_text = ""
 _auto_on = False
 _buffs_on = False  # always starts off: buffs are an explicit opt-in per session
+_load_job: Optional[Generator[Any, Any, Any]] = None
+_load_name = ""
+_load_started_s = 0.0
 _main_tick_s = 0.0
 _logged_errors: set[str] = set()
 
@@ -193,6 +200,79 @@ def _finish_build_pass(outcome: BuildPassOutcome) -> None:
         _push_history(_adapter.describe(decision))
 
 
+def _copy_template(build: SuggestedBuild) -> None:
+    PyImGui.set_clipboard_text(build.template_code)
+    _push_history(f"Template copiado: {build.name}")
+
+
+def _request_load(build: SuggestedBuild) -> None:
+    global _load_job, _load_name, _load_started_s
+    if _load_job is not None:
+        _push_history("recusado: ja esta a carregar uma build")
+        return
+    if not Routines.Checks.Map.IsOutpost():
+        _push_history("recusado: carregar so em outpost")
+        return
+    _load_job = Routines.Yield.Skills.LoadSkillbar(build.template_code, log=False)
+    _load_name = build.name
+    _load_started_s = time.monotonic()
+    _push_history(f"A carregar build: {build.name}")
+
+
+def _cancel_load() -> None:
+    global _load_job
+    if _load_job is None:
+        return
+    _load_job.close()
+    _load_job = None
+    _push_history(f"carregamento cancelado: {_load_name}")
+
+
+def _advance_load() -> None:
+    """Drive a template load one step per frame (the loader waits between steps)."""
+    global _load_job
+    if _load_job is None:
+        return
+    try:
+        next(_load_job)
+    except StopIteration:
+        _load_job = None
+        _push_history(f"Build carregada: {_load_name}")
+        return
+    except Exception as exc:
+        _load_job = None
+        _push_history(f"erro ao carregar: {exc}")
+        _log_error_once("load build", exc)
+        return
+    if time.monotonic() - _load_started_s > _LOAD_TIMEOUT_S:
+        _load_job.close()
+        _load_job = None
+        _push_history(f"carregamento expirou: {_load_name}")
+
+
+def _draw_suggested_builds() -> None:
+    if not PyImGui.collapsing_header("Builds sugeridas"):
+        return
+    try:
+        suggestions = _build_mode.suggested_builds()
+    except Exception as exc:
+        PyImGui.text("Erro ao listar as builds (ver consola)")
+        _log_error_once("suggested builds", exc)
+        return
+    if not suggestions:
+        PyImGui.text("Nenhuma build disponivel")
+        return
+    for index, build in enumerate(suggestions):
+        if PyImGui.small_button(f"Copiar##auto_rota_copy_{index}"):
+            _copy_template(build)
+        PyImGui.same_line(0.0, -1.0)
+        if PyImGui.small_button(f"Carregar##auto_rota_load_{index}"):
+            _request_load(build)
+        PyImGui.same_line(0.0, -1.0)
+        PyImGui.text(build.name)
+    PyImGui.text_disabled("Carregar: so em outpost; substitui a barra atual (skills e atributos).")
+
+
 def _update_preview() -> None:
     global _preview_text, _heroai_conflict
     _heroai_conflict = _adapter.heroai_conflict()
@@ -248,6 +328,8 @@ def _draw_window() -> None:
             PyImGui.text("Historico:")
             for line in _history:
                 PyImGui.text(line)
+            PyImGui.separator()
+            _draw_suggested_builds()
     finally:
         PyImGui.end()
 
@@ -280,11 +362,13 @@ def main() -> None:
         if not Routines.Checks.Map.MapValid():
             _set_auto(False, "mudanca de mapa")
             _build_mode.cancel()
+            _cancel_load()
             return
         _cached_data.Update()
         if not (Routines.Checks.Map.IsMapReady() and Routines.Checks.Party.IsPartyLoaded()):
             _set_auto(False, "mudanca de mapa")
             _build_mode.cancel()
+            _cancel_load()
             return
         if time.monotonic() - _main_tick_s > _HEARTBEAT_MAX_S:
             _set_auto(False, "widget em pausa")
@@ -328,6 +412,7 @@ def main() -> None:
             except Exception as exc:
                 _set_auto(False, f"erro: {exc}")
                 _log_error_once("build pass", exc)
+        _advance_load()
         if _preview_timer.HasElapsed(_PREVIEW_INTERVAL_MS):
             _preview_timer.Reset()
             try:

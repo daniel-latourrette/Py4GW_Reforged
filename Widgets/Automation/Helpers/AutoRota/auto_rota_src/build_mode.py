@@ -31,6 +31,16 @@ BarSignature = tuple[int, int, tuple[int, ...]]
 
 
 @dataclass(frozen=True)
+class SuggestedBuild:
+    name: str
+    template_code: str
+
+
+# BuildMgr's placeholder template: a build without a real template has nothing to copy or load.
+_EMPTY_TEMPLATE = "AAAAAAAAAAAAAAAA"
+
+
+@dataclass(frozen=True)
 class BuildPassOutcome:
     cast: Optional[tuple[int, int]]  # (skill_id, target_agent_id) queued by the build, if any
     error: Optional[str] = None
@@ -59,6 +69,28 @@ class BuildMode:
         self._pass_started_s: float = 0.0
         self._pending: bool = False
         self._pending_since_s: float = 0.0
+        self._suggested: Optional[list[SuggestedBuild]] = None
+
+    def _get_registry(self) -> BuildRegistry:
+        if self._registry is None:
+            self._registry = BuildRegistry()
+        return self._registry
+
+    def suggested_builds(self) -> list[SuggestedBuild]:
+        """Builds Auto Rota can drive in build mode, with a real template (cached after the first call)."""
+        if self._suggested is None:
+            # No public listing returns build instances with their flags; this is the same matchable set
+            # GetBestBuild scores (template-only, fallback, fixed and non-automator builds already excluded).
+            builds = self._get_registry()._iter_matchable_builds(match_only=True)
+            self._suggested = sorted(
+                (
+                    SuggestedBuild(name=build.build_name, template_code=build.template_code)
+                    for build in builds
+                    if is_eligible_build(_candidate_for(build)) and build.template_code != _EMPTY_TEMPLATE
+                ),
+                key=lambda suggestion: suggestion.name,
+            )
+        return list(self._suggested)
 
     @property
     def build_name(self) -> Optional[str]:
@@ -86,9 +118,7 @@ class BuildMode:
 
     def _resolve(self, signature: BarSignature) -> Optional[BuildMgr]:
         primary, secondary, skills = signature
-        if self._registry is None:
-            self._registry = BuildRegistry()
-        build = self._registry.GetBestBuild(
+        build = self._get_registry().GetBestBuild(
             current_primary=Profession(primary),
             current_secondary=Profession(secondary),
             current_skills=list(skills),
