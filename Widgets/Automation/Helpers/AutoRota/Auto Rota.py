@@ -131,6 +131,10 @@ def _finish_build_pass(outcome: BuildPassOutcome) -> None:
         cast = Decision(bar_slot=0, skill_id=skill_id, target_id=target_id, label=label)
         _push_history(_adapter.describe(cast, no_target_text="(sem alvo)"))
         return
+    reason = _adapter.blocker()
+    if reason is not None:
+        _push_history(f"recusado: {reason}")
+        return
     decision = _adapter.rotation_after_build(_build_mode.blocked_skill_ids())
     if decision is None:
         _push_history("nada a fazer")
@@ -158,9 +162,7 @@ def _update_preview() -> None:
         _preview_text = _adapter.describe(decision) if decision is not None else "nada a fazer"
         return
     interrupt = _adapter.interrupt_decision(BUILD_MODE_MAX_TIER)
-    _preview_text = (
-        _adapter.describe(interrupt) if interrupt is not None else "jogada da build (decidida ao carregar)"
-    )
+    _preview_text = _adapter.describe(interrupt) if interrupt is not None else "jogada da build (decidida ao carregar)"
 
 
 def _draw_window() -> None:
@@ -204,15 +206,18 @@ def on_disable() -> None:
     global _hotkey_registered
     HOTKEY_MANAGER.unregister_hotkey(_HOTKEY_ID)
     _hotkey_registered = False
+    _build_mode.cancel()
 
 
 def main() -> None:
     global _key_index, _main_tick_s, _preview_text
     try:
         if not Routines.Checks.Map.MapValid():
+            _build_mode.cancel()
             return
         _cached_data.Update()
         if not (Routines.Checks.Map.IsMapReady() and Routines.Checks.Party.IsPartyLoaded()):
+            _build_mode.cancel()
             return
         _main_tick_s = time.monotonic()
         if not _hotkey_registered:
@@ -224,7 +229,11 @@ def main() -> None:
             _log_error_once("build", exc)
         outcome = _build_mode.advance()
         if outcome is not None:
-            _finish_build_pass(outcome)
+            try:
+                _finish_build_pass(outcome)
+            except Exception as exc:
+                _push_history(f"erro: {exc}")
+                _log_error("build pass", exc)
         if _preview_timer.HasElapsed(_PREVIEW_INTERVAL_MS):
             _preview_timer.Reset()
             try:

@@ -102,9 +102,23 @@ class BuildMode:
         self._pending = True
         self._pending_since_s = time.monotonic()
 
+    def cancel(self) -> None:
+        """Drop any pending request and close a running pass without reporting an outcome."""
+        self._pending = False
+        if self._pass is not None:
+            try:
+                self._pass.close()
+            except Exception:
+                pass  # the pass is being abandoned; nothing to report
+            finally:
+                self._pass = None
+
     def advance(self) -> Optional[BuildPassOutcome]:
         """Call once per frame. Returns an outcome when a pass finishes, else None."""
-        if self._pass is None:
+        if self._pass is not None:
+            if time.monotonic() - self._pass_started_s > _PASS_TIMEOUT_S:
+                return self._finish(None)  # stale pass (widget was not ticking); do not step it again
+        else:
             if not self._pending:
                 return None
             self._pending = False
