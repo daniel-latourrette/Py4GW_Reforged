@@ -2,6 +2,8 @@
 
 Data: 2026-10-24 · Estado: implementado, por validar no jogo · Branch: `feature/auto-rota`
 
+Ver também: `docs/superpowers/specs/2026-10-25-auto-rota-hex-guard-design.md` (guarda contra hexes punitivos).
+
 ## Objetivo
 
 Um widget em que o jogador carrega numa tecla e o personagem executa a
