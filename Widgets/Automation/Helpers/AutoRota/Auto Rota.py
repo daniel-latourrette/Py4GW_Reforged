@@ -32,6 +32,17 @@ from Widgets.Automation.Helpers.AutoRota.auto_rota_src.cast_watch import cast_pr
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.cast_watch import fit_text
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.cast_watch import interrupt_text
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.decide import interrupt_from_rows
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.energy_reserve import CANNOT_INTERRUPT_TEXT
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.energy_reserve import MODE_CHOICES
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.energy_reserve import MODE_LABELS
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.energy_reserve import RESERVE_FIXED_DEFAULT
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.energy_reserve import RESERVE_FIXED_MAX
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.energy_reserve import EnergyStatus
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.energy_reserve import ReserveMode
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.energy_reserve import energy_line
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.energy_reserve import mode_from_setting
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.energy_reserve import reserve_pause_text
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.energy_reserve import reserve_skipped_suffix
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.game_adapter import REASON_BUSY
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.game_adapter import STOP_REASONS
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.game_adapter import GameAdapter
@@ -59,6 +70,8 @@ _SETTINGS_BUFF_HOTKEY = "buff_hotkey"
 _SETTINGS_HEX_GUARD = "hex_guard"
 _SETTINGS_INTERRUPT_HOTKEY = "interrupt_hotkey"
 _SETTINGS_CAST_WATCH_OPEN = "cast_watch_open"
+_SETTINGS_RESERVE_MODE = "energy_reserve_mode"
+_SETTINGS_RESERVE_FIXED = "energy_reserve_fixed"
 _WATCH_WINDOW = "Auto Rota: casts##auto_rota_casts"
 _WATCH_ROW_H = 22.0
 _WATCH_ICON = 20.0
@@ -118,6 +131,10 @@ _watch_key_target = 0  # agent the one-tap key would interrupt now (0: none)
 _watch_key_text = ""
 _watch_paused = ""  # stop reason while the Auto Rota cannot play
 _watch_error = False
+_reserve_mode = ReserveMode.CHEAPEST  # loaded from the settings together with the keys
+_reserve_fixed = RESERVE_FIXED_DEFAULT
+_energy_status: Optional[EnergyStatus] = None
+_energy_text = ""
 _load_job: Optional[Generator[Any, Any, Any]] = None
 _load_name = ""
 _load_started_s = 0.0
@@ -303,7 +320,12 @@ def _play_once() -> None:
     # A build pass cannot skip single skills: while the guard blocks one of the build's skills, play the
     # generic rotation (all interrupt tiers, then HeroAI) over the skills the guard still allows.
     if _build_mode.build_name is None or build_paused_by_guard(_guard_ids, _build_mode.blocked_skill_ids()):
-        decision = _adapter.next_decision(allow_buffs=_buffs_on, blocked_skill_ids=_guard_ids)
+        decision = _adapter.next_decision(
+            allow_buffs=_buffs_on,
+            blocked_skill_ids=_guard_ids,
+            reserve_mode=_reserve_mode,
+            reserve_fixed=_reserve_fixed,
+        )
         if decision is not None:
             _adapter.execute(decision)
             _push_history(_adapter.describe(decision))
@@ -332,7 +354,9 @@ def _finish_build_pass(outcome: BuildPassOutcome) -> None:
     if outcome.cast is not None or not _auto_on or _adapter.blocker() is not None:
         return
     blocked = set(_build_mode.blocked_skill_ids()) | _guard_ids
-    decision = _adapter.rotation_after_build(sorted(blocked), allow_buffs=_buffs_on)
+    decision = _adapter.rotation_after_build(
+        sorted(blocked), allow_buffs=_buffs_on, reserve_mode=_reserve_mode, reserve_fixed=_reserve_fixed
+    )
     if decision is not None:
         _adapter.execute(decision)
         _push_history(_adapter.describe(decision))
@@ -411,14 +435,36 @@ def _draw_suggested_builds() -> None:
     PyImGui.text_disabled("Carregar: so em outpost; substitui a barra atual (skills e atributos).")
 
 
+def _update_energy() -> None:
+    """Energy line and the "cannot interrupt" state for both windows (needs the sync cast_watch just did)."""
+    global _energy_status, _energy_text
+    try:
+        status = _adapter.energy_status(_reserve_mode, _reserve_fixed)
+        name = _adapter.skill_name(status.reserve_skill_id) if status.reserve_skill_id else ""
+        _energy_status, _energy_text = status, energy_line(status, name)
+    except Exception as exc:
+        _energy_status, _energy_text = None, "Energia: erro (ver consola)"
+        _log_error_once("energy", exc)
+
+
+def _preview_decision_text(decision: Optional[Decision]) -> str:
+    """Preview text of a generic decision, saying when the energy reserve skipped a rotation skill."""
+    skipped = _adapter.reserve_skip_skill_id
+    if decision is None:
+        return reserve_pause_text(_adapter.skill_name(skipped)) if skipped else "nada a fazer"
+    text = _adapter.describe(decision)
+    return text + reserve_skipped_suffix(_adapter.skill_name(skipped)) if skipped else text
+
+
 def _update_preview() -> None:
-    global _preview_text, _heroai_conflict, _watch_paused, _watch_error
+    global _preview_text, _heroai_conflict, _watch_paused, _watch_error, _energy_status, _energy_text
     _heroai_conflict = _adapter.heroai_conflict()
     reason = _adapter.blocker()
     if reason is not None and reason != REASON_BUSY:
         _preview_text = f"em pausa ({reason})"
         _watch_paused = reason
         _store_watch([])
+        _energy_status, _energy_text = None, ""
         return
     _watch_paused = ""
     rows: Optional[list[CastRow]] = None
@@ -429,11 +475,19 @@ def _update_preview() -> None:
         _watch_error = True
         _log_error_once("cast watch", exc)
     _refresh_watch(rows or [])
+    _update_energy()
     build_ids = _build_mode.blocked_skill_ids()
     build_paused = _build_mode.build_name is not None and build_paused_by_guard(_guard_ids, build_ids)
     if _build_mode.build_name is None or build_paused:
-        decision = _adapter.next_decision(preview=True, allow_buffs=_buffs_on, blocked_skill_ids=_guard_ids, rows=rows)
-        text = _adapter.describe(decision) if decision is not None else "nada a fazer"
+        decision = _adapter.next_decision(
+            preview=True,
+            allow_buffs=_buffs_on,
+            blocked_skill_ids=_guard_ids,
+            rows=rows,
+            reserve_mode=_reserve_mode,
+            reserve_fixed=_reserve_fixed,
+        )
+        text = _preview_decision_text(decision)
         _preview_text = f"build em pausa ({guard_reason(_guard_hexes)}): {text}" if build_paused else text
         return
     if rows is not None:
@@ -543,6 +597,8 @@ def _draw_cast_watch_body() -> int:
         PyImGui.text_disabled("sem interrupt viavel")
     if _auto_on:
         PyImGui.text_disabled("tecla em pausa: o ciclo esta ligado")
+    if _energy_status is not None and _energy_status.cannot_interrupt:
+        PyImGui.text_colored(CANNOT_INTERRUPT_TEXT, _WARNING_COLOR)
     clicked = 0
     PyImGui.begin_child("##auto_rota_casts_list", size, True, 0)
     try:
@@ -578,7 +634,7 @@ def _draw_cast_watch() -> None:
 
 def _draw_window() -> None:
     global _key_index, _key_edge, _buff_key_index, _buff_key_edge, _guard_on
-    global _interrupt_key_index, _interrupt_key_edge
+    global _interrupt_key_index, _interrupt_key_edge, _reserve_mode, _reserve_fixed
     opened = PyImGui.begin(MODULE_NAME, int(PyImGui.WindowFlags.AlwaysAutoResize))
     try:
         if opened:
@@ -592,6 +648,10 @@ def _draw_window() -> None:
                 PyImGui.text_colored(f"Buffs: LIGADOS  ({buff_label})", _ON_COLOR)
             else:
                 PyImGui.text(f"Buffs: DESLIGADOS  ({buff_label})")
+            if _energy_text:
+                PyImGui.text(_energy_text)
+            if _energy_status is not None and _energy_status.cannot_interrupt:
+                PyImGui.text_colored(CANNOT_INTERRUPT_TEXT, _WARNING_COLOR)
             if _guard_error:
                 PyImGui.text_colored("Guarda: erro a ler efeitos (ver consola)", _WARNING_COLOR)
             for active in _guard_hexes:
@@ -633,6 +693,18 @@ def _draw_window() -> None:
             new_watch_open = PyImGui.checkbox("Vigia de casts", _watch_open)
             if new_watch_open != _watch_open:
                 _set_watch_open(new_watch_open)
+            mode_index = MODE_CHOICES.index(_reserve_mode)
+            new_mode_index = PyImGui.combo("Reserva interrupt", mode_index, [MODE_LABELS[m] for m in MODE_CHOICES])
+            if new_mode_index != mode_index:
+                _reserve_mode = MODE_CHOICES[new_mode_index]
+                _settings.set_str(_SETTINGS_SECTION, _SETTINGS_RESERVE_MODE, _reserve_mode.value)
+                _push_history(f"Reserva interrupt: {MODE_LABELS[_reserve_mode]}")
+            if _reserve_mode is ReserveMode.FIXED:
+                new_fixed = PyImGui.slider_int("Reserva fixa", _reserve_fixed, 0, RESERVE_FIXED_MAX)
+                new_fixed = min(RESERVE_FIXED_MAX, max(0, new_fixed))  # Ctrl+click typing is not clamped by ImGui
+                if new_fixed != _reserve_fixed:
+                    _reserve_fixed = new_fixed
+                    _settings.set_int(_SETTINGS_SECTION, _SETTINGS_RESERVE_FIXED, new_fixed)
             if _ignored_text:
                 PyImGui.text(f"Ultimo toque ignorado: {_ignored_text}")
             PyImGui.separator()
@@ -661,6 +733,7 @@ def tooltip() -> None:
     PyImGui.text("Guarda de hexes: pausa as skills que um hex em ti castiga (ex.: Backfire -> spells).")
     PyImGui.text("Tecla interrupt (F3): com o ciclo desligado, interrompe uma vez o cast mais importante.")
     PyImGui.text("Vigia de casts: janela com os casts inimigos ao alcance e o interrupt que chega a tempo.")
+    PyImGui.text("Reserva de energia: so na rotacao (a build gere a propria energia).")
     PyImGui.end_tooltip()
 
 
@@ -672,7 +745,7 @@ def on_disable() -> None:
 
 def main() -> None:
     global _key_index, _buff_key_index, _key_loaded, _main_tick_s, _preview_text, _guard_on
-    global _interrupt_key_index, _watch_open
+    global _interrupt_key_index, _watch_open, _reserve_mode, _reserve_fixed
     try:
         if not Routines.Checks.Map.MapValid():
             _set_auto(False, "mudanca de mapa")
@@ -695,6 +768,10 @@ def main() -> None:
             _guard_on = _settings.get_bool(_SETTINGS_SECTION, _SETTINGS_HEX_GUARD, True)
             _interrupt_key_index = _load_key_index(_SETTINGS_INTERRUPT_HOTKEY, Key.VK_F3)
             _watch_open = _settings.get_bool(_SETTINGS_SECTION, _SETTINGS_CAST_WATCH_OPEN, True)
+            saved_mode = _settings.get_str(_SETTINGS_SECTION, _SETTINGS_RESERVE_MODE, ReserveMode.CHEAPEST.value)
+            _reserve_mode = mode_from_setting(saved_mode)
+            saved_fixed = _settings.get_int(_SETTINGS_SECTION, _SETTINGS_RESERVE_FIXED, RESERVE_FIXED_DEFAULT)
+            _reserve_fixed = min(RESERVE_FIXED_MAX, max(0, saved_fixed))
             _key_loaded = True
         try:
             _build_mode.refresh()
