@@ -13,6 +13,8 @@ from typing import Optional
 import PyImGui
 import PySystem
 
+from Py4GWCoreLib import Agent
+from Py4GWCoreLib import ImGui
 from Py4GWCoreLib import Player
 from Py4GWCoreLib import Routines
 from Py4GWCoreLib import Timer
@@ -24,6 +26,11 @@ from Py4GWCoreLib.py4gwcorelib_src.Settings import Settings
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.build_mode import BuildMode
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.build_mode import BuildPassOutcome
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.build_mode import SuggestedBuild
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.cast_watch import WATCH_MAX_ROWS
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.cast_watch import WatchLabels
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.cast_watch import cast_progress
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.cast_watch import interrupt_text
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.decide import interrupt_from_rows
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.game_adapter import REASON_BUSY
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.game_adapter import STOP_REASONS
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.game_adapter import GameAdapter
@@ -34,9 +41,13 @@ from Widgets.Automation.Helpers.AutoRota.auto_rota_src.hex_guard import history_
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.hex_guard import warning_text
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.key_edge import KeyEdge
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.key_edge import next_auto_state
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.key_edge import shadowed_positions
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.model import ActiveHex
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.model import CastRow
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.model import Decision
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.priorities import BUILD_MODE_MAX_TIER
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.priorities import TIER_COLORS
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.priorities import Tier
 
 MODULE_NAME = "Auto Rota"
 MODULE_ICON = "Assets/Textures/Module_Icons/Combat.png"
@@ -45,6 +56,20 @@ _SETTINGS_SECTION = "AutoRota"
 _SETTINGS_HOTKEY = "hotkey"
 _SETTINGS_BUFF_HOTKEY = "buff_hotkey"
 _SETTINGS_HEX_GUARD = "hex_guard"
+_SETTINGS_INTERRUPT_HOTKEY = "interrupt_hotkey"
+_SETTINGS_CAST_WATCH_OPEN = "cast_watch_open"
+_WATCH_WINDOW = "Auto Rota: casts##auto_rota_casts"
+_WATCH_ROW_H = 22.0
+_WATCH_ICON = 20.0
+_WATCH_BAR_W = 90.0
+_WATCH_COLUMNS: tuple[tuple[str, float], ...] = (
+    ("Inimigo", 130.0),
+    ("##icon", _WATCH_ICON),
+    ("Skill", 120.0),
+    ("Cast", _WATCH_BAR_W),
+    ("Interrupt", 120.0),
+)
+_TRACK_COLOR = (0.20, 0.20, 0.20, 1.0)
 _PREVIEW_INTERVAL_MS = 100
 _HISTORY_SIZE = 5
 _HEARTBEAT_MAX_S = 0.5
@@ -82,6 +107,16 @@ _guard_on = True  # loaded from the settings together with the keys; on by defau
 _guard_hexes: tuple[ActiveHex, ...] = ()
 _guard_ids: frozenset[int] = frozenset()
 _guard_error = False
+_interrupt_key_index = 3  # F3 until the settings are loaded
+_interrupt_key_edge = KeyEdge()
+_watch_open = True  # loaded from the settings together with the keys
+_watch_rows: list[CastRow] = []
+_watch_labels: list[WatchLabels] = []
+_watch_read_s = 0.0
+_watch_key_target = 0  # agent the one-tap key would interrupt now (0: none)
+_watch_key_text = ""
+_watch_paused = ""  # stop reason while the Auto Rota cannot play
+_watch_error = False
 _load_job: Optional[Generator[Any, Any, Any]] = None
 _load_name = ""
 _load_started_s = 0.0
@@ -194,6 +229,48 @@ def _on_toggle_press() -> None:
     if turning_on and stop_reason is not None:
         _push_history(f"recusado: {stop_reason}")
     _set_auto(next_auto_state(_auto_on, True, stop_reason is not None), stop_reason or "")
+
+
+def _store_watch(rows: list[CastRow]) -> None:
+    """Keep one read for the cast watch: rows, display strings and what the one-tap key would fire."""
+    global _watch_rows, _watch_labels, _watch_read_s, _watch_key_target, _watch_key_text
+    labels: list[WatchLabels] = []
+    for row in rows[:WATCH_MAX_ROWS]:
+        slot_name = _adapter.skill_name(row.slot.skill_id) if row.slot is not None else ""
+        labels.append(
+            WatchLabels(
+                enemy=_adapter.agent_name(row.cast.agent_id),
+                skill=_adapter.skill_name(row.cast.skill_id),
+                icon_path=_adapter.skill_icon_path(row.cast.skill_id),
+                interrupt=interrupt_text(row, slot_name),
+            )
+        )
+    decision = interrupt_from_rows(rows, Tier.OTHER)
+    _watch_rows, _watch_labels, _watch_read_s = rows, labels, time.monotonic()
+    _watch_key_target = decision.target_id if decision is not None else 0
+    _watch_key_text = _adapter.describe(decision) if decision is not None else ""
+
+
+def _on_interrupt_press() -> None:
+    if not _press_allowed():
+        return
+    if _auto_on:
+        _ignore_press("ciclo ligado: a tecla de interrupt so funciona com ele desligado")
+        return
+    reason = REASON_BUSY if _build_mode.busy else _adapter.blocker()
+    if reason is not None:
+        _ignore_press(f"interrupt: {reason}")
+        return
+    rows = _adapter.cast_watch(_guard_ids)  # fresh read: whether an interrupt lands depends on the instant
+    _store_watch(rows)
+    # All tiers, also with a detected build: the build-mode limit defers to the build's own logic,
+    # which only runs while the loop is on.
+    decision = interrupt_from_rows(rows, Tier.OTHER)
+    if decision is None:
+        _ignore_press("nenhum interrupt pronto chega a tempo" if rows else "sem casts inimigos ao alcance")
+        return
+    _adapter.execute(decision)
+    _push_history(f"1 toque: {_adapter.describe(decision)}")
 
 
 def _play_once() -> None:
@@ -312,25 +389,163 @@ def _draw_suggested_builds() -> None:
 
 
 def _update_preview() -> None:
-    global _preview_text, _heroai_conflict
+    global _preview_text, _heroai_conflict, _watch_paused, _watch_error
     _heroai_conflict = _adapter.heroai_conflict()
     reason = _adapter.blocker()
     if reason is not None and reason != REASON_BUSY:
         _preview_text = f"em pausa ({reason})"
+        _watch_paused = reason
+        _store_watch([])
         return
+    _watch_paused = ""
+    rows: Optional[list[CastRow]] = None
+    try:
+        rows = _adapter.cast_watch(_guard_ids)  # one read per tick feeds the preview and the cast watch
+        _watch_error = False
+    except Exception as exc:
+        _watch_error = True
+        _log_error_once("cast watch", exc)
+    _store_watch(rows or [])
     build_ids = _build_mode.blocked_skill_ids()
     build_paused = _build_mode.build_name is not None and build_paused_by_guard(_guard_ids, build_ids)
     if _build_mode.build_name is None or build_paused:
-        decision = _adapter.next_decision(preview=True, allow_buffs=_buffs_on, blocked_skill_ids=_guard_ids)
+        decision = _adapter.next_decision(preview=True, allow_buffs=_buffs_on, blocked_skill_ids=_guard_ids, rows=rows)
         text = _adapter.describe(decision) if decision is not None else "nada a fazer"
         _preview_text = f"build em pausa ({guard_reason(_guard_hexes)}): {text}" if build_paused else text
         return
-    interrupt = _adapter.interrupt_decision(BUILD_MODE_MAX_TIER, blocked_skill_ids=_guard_ids)
+    if rows is not None:
+        interrupt = interrupt_from_rows(rows, BUILD_MODE_MAX_TIER)
+    else:
+        interrupt = _adapter.interrupt_decision(BUILD_MODE_MAX_TIER, blocked_skill_ids=_guard_ids)
     _preview_text = _adapter.describe(interrupt) if interrupt is not None else "jogada da build (decidida ao jogar)"
+
+
+def _set_watch_open(open_: bool) -> None:
+    global _watch_open
+    _watch_open = open_
+    _settings.set_bool(_SETTINGS_SECTION, _SETTINGS_CAST_WATCH_OPEN, open_)
+
+
+def _draw_cast_table() -> int:
+    """Draw the cast rows; return the agent id of a clicked row (0: none)."""
+    flags = int(
+        PyImGui.TableFlags.RowBg
+        | PyImGui.TableFlags.BordersInnerV
+        | PyImGui.TableFlags.SizingFixedFit
+        | PyImGui.TableFlags.NoSavedSettings
+    )
+    if not PyImGui.begin_table("auto_rota_casts_table", 5, flags):
+        return 0
+    clicked = 0
+    try:
+        fixed = int(PyImGui.TableColumnFlags.WidthFixed)
+        for name, width in _WATCH_COLUMNS:
+            PyImGui.table_setup_column(name, fixed, width)
+        PyImGui.table_headers_row()
+        target_id = int(Player.GetTargetID() or 0)
+        seconds_since_read = time.monotonic() - _watch_read_s
+        for row, labels in zip(_watch_rows, _watch_labels):
+            agent_id = row.cast.agent_id
+            color = TIER_COLORS[row.tier]
+            PyImGui.table_next_row(0, _WATCH_ROW_H)
+            PyImGui.table_next_column()
+            marker = "> " if agent_id == _watch_key_target else ""
+            # "###": the ID depends on the agent only, so a click survives the marker or the name changing mid-press.
+            label = f"{marker}{labels.enemy}###auto_rota_cast_{agent_id}"
+            span = int(PyImGui.SelectableFlags.SpanAllColumns)
+            if PyImGui.selectable(label, agent_id == target_id, span, (0.0, _WATCH_ROW_H)):
+                clicked = agent_id
+            PyImGui.table_next_column()
+            if labels.icon_path:
+                ImGui.DrawTexture(labels.icon_path, _WATCH_ICON, _WATCH_ICON)
+            else:
+                PyImGui.text("?")
+            PyImGui.table_next_column()
+            PyImGui.text_colored(labels.skill, color)
+            PyImGui.table_next_column()
+            progress = cast_progress(row.cast, seconds_since_read)
+            PyImGui.push_style_color(int(PyImGui.ImGuiCol.PlotHistogram), color)
+            PyImGui.push_style_color(int(PyImGui.ImGuiCol.FrameBg), _TRACK_COLOR)
+            try:
+                # Fixed width: AlwaysAutoResize collapses a -1 (fill) progress bar to nothing.
+                PyImGui.progress_bar(progress.fraction or 0.0, _WATCH_BAR_W, 0.0, progress.label)
+            finally:
+                PyImGui.pop_style_color(2)
+            PyImGui.table_next_column()
+            if row.slot is not None:
+                PyImGui.text_colored(labels.interrupt, _ON_COLOR)
+            else:
+                PyImGui.text_disabled(labels.interrupt)
+        hidden = len(_watch_rows) - len(_watch_labels)
+        if hidden > 0:
+            PyImGui.table_next_row(0, _WATCH_ROW_H)
+            PyImGui.table_next_column()
+            PyImGui.text_disabled(f"+{hidden} casts")
+    finally:
+        PyImGui.end_table()
+    return clicked
+
+
+def _watch_size() -> tuple[float, float]:
+    """List size from the live style: header, WATCH_MAX_ROWS rows and "+N casts", fixed per theme (never jumps)."""
+    style = PyImGui.get_style()
+    line_h = PyImGui.get_text_line_height()
+    cell_x, cell_y = style.CellPadding
+    pad_x, pad_y = style.WindowPadding
+    # A table row is its tallest cell plus CellPadding.y above and below; the progress bar is a framed widget.
+    row_h = max(_WATCH_ROW_H, line_h + 2.0 * style.FramePadding[1]) + 2.0 * cell_y
+    header_h = line_h + 2.0 * cell_y
+    height = header_h + (WATCH_MAX_ROWS + 1) * row_h + 2.0 * pad_y + 2.0
+    columns_w = sum(column_w for _, column_w in _WATCH_COLUMNS)
+    width = columns_w + len(_WATCH_COLUMNS) * (2.0 * cell_x + 1.0) + 2.0 * pad_x
+    return (width, height)
+
+
+def _draw_cast_watch_body() -> int:
+    """Header line and the fixed-size list; return the agent id of a clicked row (0: none)."""
+    key_label = _KEY_CHOICES[_interrupt_key_index][0]
+    if _watch_key_text:
+        PyImGui.text_colored(f"Interrupt ({key_label}): {_watch_key_text}", _ON_COLOR)
+    else:
+        PyImGui.text_disabled("sem interrupt viavel")
+    if _auto_on:
+        PyImGui.text_disabled("tecla em pausa: o ciclo esta ligado")
+    clicked = 0
+    PyImGui.begin_child("##auto_rota_casts_list", _watch_size(), True, 0)
+    try:
+        if _watch_paused:
+            PyImGui.text_disabled(f"em pausa ({_watch_paused})")
+        elif _watch_error:
+            PyImGui.text_colored("erro (ver consola)", _WARNING_COLOR)
+        elif not _watch_rows:
+            PyImGui.text_disabled("nenhum inimigo a fazer cast")
+        else:
+            clicked = _draw_cast_table()
+    finally:
+        PyImGui.end_child()
+    return clicked
+
+
+def _draw_cast_watch() -> None:
+    if not _watch_open:
+        return
+    flags = int(PyImGui.WindowFlags.AlwaysAutoResize | PyImGui.WindowFlags.NoCollapse)
+    visible, still_open = PyImGui.begin_with_close(_WATCH_WINDOW, True, flags)
+    clicked = 0
+    try:
+        if visible:
+            clicked = _draw_cast_watch_body()
+    finally:
+        PyImGui.end()
+    if not still_open:
+        _set_watch_open(False)
+    if clicked and Agent.IsValid(clicked):
+        Player.ChangeTarget(clicked)  # a click only selects; the one-tap key fires
 
 
 def _draw_window() -> None:
     global _key_index, _key_edge, _buff_key_index, _buff_key_edge, _guard_on
+    global _interrupt_key_index, _interrupt_key_edge
     opened = PyImGui.begin(MODULE_NAME, int(PyImGui.WindowFlags.AlwaysAutoResize))
     try:
         if opened:
@@ -365,13 +580,26 @@ def _draw_window() -> None:
                 _buff_key_index = new_buff_index
                 _settings.set_str(_SETTINGS_SECTION, _SETTINGS_BUFF_HOTKEY, _KEY_CHOICES[new_buff_index][1].name)
                 _buff_key_edge = KeyEdge()
-            if _buff_key_index == _key_index:
-                PyImGui.text_colored("As duas teclas sao iguais: a tecla dos buffs e ignorada", _WARNING_COLOR)
+            new_interrupt_index = PyImGui.combo("Tecla interrupt", _interrupt_key_index, labels)
+            if new_interrupt_index != _interrupt_key_index:
+                _interrupt_key_index = new_interrupt_index
+                _settings.set_str(
+                    _SETTINGS_SECTION, _SETTINGS_INTERRUPT_HOTKEY, _KEY_CHOICES[new_interrupt_index][1].name
+                )
+                _interrupt_key_edge = KeyEdge()
+            shadowed = shadowed_positions((_key_index, _buff_key_index, _interrupt_key_index))
+            if 1 in shadowed:
+                PyImGui.text_colored("Tecla dos buffs igual a outra: e ignorada", _WARNING_COLOR)
+            if 2 in shadowed:
+                PyImGui.text_colored("Tecla interrupt igual a outra: e ignorada", _WARNING_COLOR)
             new_guard_on = PyImGui.checkbox("Guarda de hexes", _guard_on)
             if new_guard_on != _guard_on:
                 _guard_on = new_guard_on
                 _settings.set_bool(_SETTINGS_SECTION, _SETTINGS_HEX_GUARD, new_guard_on)
                 _push_history("Guarda de hexes LIGADA" if new_guard_on else "Guarda de hexes DESLIGADA")
+            new_watch_open = PyImGui.checkbox("Vigia de casts", _watch_open)
+            if new_watch_open != _watch_open:
+                _set_watch_open(new_watch_open)
             if _ignored_text:
                 PyImGui.text(f"Ultimo toque ignorado: {_ignored_text}")
             PyImGui.separator()
@@ -398,6 +626,8 @@ def tooltip() -> None:
     PyImGui.text("Desliga ao morrer, mudar de mapa ou ligar o combate do HeroAI.")
     PyImGui.text("A tecla dos buffs liga/desliga o uso de buffs (Mantras, Channeling, Ether Signet...).")
     PyImGui.text("Guarda de hexes: pausa as skills que um hex em ti castiga (ex.: Backfire -> spells).")
+    PyImGui.text("Tecla interrupt (F3): com o ciclo desligado, interrompe uma vez o cast mais importante.")
+    PyImGui.text("Vigia de casts: janela com os casts inimigos ao alcance e o interrupt que chega a tempo.")
     PyImGui.end_tooltip()
 
 
@@ -409,6 +639,7 @@ def on_disable() -> None:
 
 def main() -> None:
     global _key_index, _buff_key_index, _key_loaded, _main_tick_s, _preview_text, _guard_on
+    global _interrupt_key_index, _watch_open
     try:
         if not Routines.Checks.Map.MapValid():
             _set_auto(False, "mudanca de mapa")
@@ -429,6 +660,8 @@ def main() -> None:
             _key_index = _load_key_index(_SETTINGS_HOTKEY, Key.VK_OEM_3)
             _buff_key_index = _load_key_index(_SETTINGS_BUFF_HOTKEY, Key.VK_F2)
             _guard_on = _settings.get_bool(_SETTINGS_SECTION, _SETTINGS_HEX_GUARD, True)
+            _interrupt_key_index = _load_key_index(_SETTINGS_INTERRUPT_HOTKEY, Key.VK_F3)
+            _watch_open = _settings.get_bool(_SETTINGS_SECTION, _SETTINGS_CAST_WATCH_OPEN, True)
             _key_loaded = True
         try:
             _build_mode.refresh()
@@ -444,13 +677,22 @@ def main() -> None:
             except Exception as exc:
                 _push_history(f"erro: {exc}")
                 _log_error("key press", exc)
-        buff_key_down = _buff_key_index != _key_index and _is_key_down(_KEY_CHOICES[_buff_key_index][1].value)
+        # Equal keys: the toggle wins over buffs, buffs win over the one-tap interrupt.
+        shadowed = shadowed_positions((_key_index, _buff_key_index, _interrupt_key_index))
+        buff_key_down = 1 not in shadowed and _is_key_down(_KEY_CHOICES[_buff_key_index][1].value)
         if _buff_key_edge.update(buff_key_down):
             try:
                 _on_buff_toggle_press()
             except Exception as exc:
                 _push_history(f"erro: {exc}")
                 _log_error("buff key press", exc)
+        interrupt_key_down = 2 not in shadowed and _is_key_down(_KEY_CHOICES[_interrupt_key_index][1].value)
+        if _interrupt_key_edge.update(interrupt_key_down):
+            try:
+                _on_interrupt_press()
+            except Exception as exc:
+                _push_history(f"erro: {exc}")
+                _log_error("interrupt key press", exc)
         if _auto_on:
             stop_reason = _stop_reason()
             if stop_reason is not None:
@@ -477,6 +719,10 @@ def main() -> None:
                 _preview_text = "erro (ver consola)"
                 _log_error_once("preview", exc)
         _draw_window()
+        try:
+            _draw_cast_watch()
+        except Exception as exc:
+            _log_error_once("cast watch window", exc)
     except Exception as exc:
         _log_error_once("main", exc)
 
