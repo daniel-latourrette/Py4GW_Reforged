@@ -41,6 +41,12 @@ from Py4GWCoreLib.py4gwcorelib_src.WidgetManager import get_widget_handler
 from .decide import cast_rows
 from .decide import choose_interrupt
 from .decide import interrupt_from_rows
+from .energy_reserve import EnergyStatus
+from .energy_reserve import InterruptCost
+from .energy_reserve import ReserveMode
+from .energy_reserve import breaks_reserve
+from .energy_reserve import effective_reserve
+from .energy_reserve import make_energy_status
 from .hex_guard import active_punishing_hexes
 from .model import ActionKind
 from .model import ActiveHex
@@ -186,6 +192,8 @@ class GameAdapter:
         self._combat = CombatClass()
         self._last_execute_s: float = 0.0
         self._logged_failures: set[tuple[int, int]] = set()
+        # First rotation skill the energy reserve skipped in the last decision (0: none), for the preview line.
+        self.reserve_skip_skill_id: int = 0
 
     def _sync_combat(self, blocked_skill_ids: Iterable[int] = ()) -> CombatClass:
         """Rebuild the private CombatClass from the live skillbar right before a decision."""
@@ -195,6 +203,7 @@ class GameAdapter:
         combat.ApplyBlockedSkillIDs(list(blocked_skill_ids))
         combat.is_skill_enabled = [True] * MAX_SKILLS
         combat.is_targeting_enabled = True
+        self.reserve_skip_skill_id = 0
         return combat
 
     def heroai_conflict(self) -> bool:
@@ -286,24 +295,51 @@ class GameAdapter:
             )
         return slots
 
-    def _has_resources(self, skill_id: int, adrenaline_a: int) -> bool:
-        # Mirrors the adrenaline/energy gates of CombatClass.IsReadyToCast,
-        # which cannot be reused here because it also picks its own target.
-        combat = self._combat
+    def _current_energy(self) -> Optional[float]:
+        """Current energy in points, read like IsReadyToCast (HeroAI mirror); None when it cannot be read."""
         player_id = Player.GetAgentID()
-        adrenaline_required = GLOBAL_CACHE.Skill.Data.GetAdrenaline(skill_id)
-        if adrenaline_required > 0 and adrenaline_a < adrenaline_required:
-            return False
-        energy_fraction = combat.GetEnergyValues(player_id)
+        energy_fraction = self._combat.GetEnergyValues(player_id)
         if energy_fraction < 0.0:
-            return False
-        current_energy = energy_fraction * Agent.GetMaxEnergy(player_id)
-        energy_cost = Routines.Checks.Skills.GetEnergyCostWithEffects(skill_id, player_id)
+            return None
+        return energy_fraction * Agent.GetMaxEnergy(player_id)
+
+    def _energy_cost(self, skill_id: int) -> float:
+        """Effective energy cost (effects such as Primal Echoes, then Expertise), as IsReadyToCast computes it."""
+        combat = self._combat
+        energy_cost = Routines.Checks.Skills.GetEnergyCostWithEffects(skill_id, Player.GetAgentID())
         if combat.expertise_exists:
             energy_cost = Routines.Checks.Skills.apply_expertise_reduction(
                 energy_cost, combat.expertise_level, skill_id
             )
-        return current_energy >= energy_cost
+        return float(energy_cost)
+
+    def _has_resources(self, skill_id: int, adrenaline_a: int) -> bool:
+        # Mirrors the adrenaline/energy gates of CombatClass.IsReadyToCast,
+        # which cannot be reused here because it also picks its own target.
+        adrenaline_required = GLOBAL_CACHE.Skill.Data.GetAdrenaline(skill_id)
+        if adrenaline_required > 0 and adrenaline_a < adrenaline_required:
+            return False
+        current_energy = self._current_energy()
+        return current_energy is not None and current_energy >= self._energy_cost(skill_id)
+
+    def _interrupt_costs(self) -> list[InterruptCost]:
+        """Every interrupt-layer skill on the bar, ready or recharging, with its effective cost.
+
+        No energy filter (it would drop the reserve to 0 exactly when energy is low) and no blocked-id filter:
+        build-owned interrupts and the ones the hex guard pauses still need energy when they come back.
+        """
+        costs: list[InterruptCost] = []
+        for skill in self._combat.GetSkills():
+            data = skill.custom_skill_data
+            if skill.skill_id == 0 or data.Nature != SkillNature.Interrupt.value:
+                continue
+            if int(data.TargetAllegiance) not in _REACH_BY_ALLEGIANCE:
+                continue
+            adrenaline_required = GLOBAL_CACHE.Skill.Data.GetAdrenaline(skill.skill_id)
+            recharged = skill.skillbar_data.recharge == 0
+            ready = recharged and int(skill.skillbar_data.adrenaline_a) >= adrenaline_required
+            costs.append(InterruptCost(skill_id=skill.skill_id, cost=self._energy_cost(skill.skill_id), ready=ready))
+        return costs
 
     def _is_feasible(self, slot: InterruptSlot, cast: EnemyCast) -> bool:
         combat = self._combat
@@ -344,9 +380,20 @@ class GameAdapter:
             return Agent.IsKnockedDown(target_id)
         return True
 
-    def _rotation_decision(self, preview: bool = False, allow_buffs: bool = True) -> Optional[Decision]:
+    def _rotation_decision(
+        self,
+        preview: bool = False,
+        allow_buffs: bool = True,
+        reserve_mode: ReserveMode = ReserveMode.OFF,
+        reserve_fixed: int = 0,
+    ) -> Optional[Decision]:
         combat = self._combat
         selected_enemy = self._selected_enemy()
+        maximum_energy = float(Agent.GetMaxEnergy(Player.GetAgentID()))
+        current_energy = self._current_energy()
+        reserve = 0.0
+        if reserve_mode is not ReserveMode.OFF and current_energy is not None:
+            reserve = effective_reserve(reserve_mode, reserve_fixed, self._interrupt_costs(), maximum_energy)
         for index, skill in enumerate(combat.GetSkills()):
             data = skill.custom_skill_data
             allegiance = int(data.TargetAllegiance)
@@ -367,6 +414,17 @@ class GameAdapter:
                     continue
             elif not combat.in_aggro and not combat.IsOOCSkill(index):
                 continue  # out of combat only out-of-combat skills, like HeroAI (no buff spam while walking)
+            if reserve > 0 and current_energy is not None:
+                energy_buff = data.Nature == SkillNature.EnergyBuff.value
+                skill_cost = self._energy_cost(skill.skill_id)
+                if breaks_reserve(current_energy, skill_cost, reserve, maximum_energy, skill.skill_id, energy_buff):
+                    # Only an affordable skill is credited to the reserve: an unaffordable one would be refused
+                    # anyway, so the preview must not blame the reserve for it.
+                    if self.reserve_skip_skill_id == 0 and current_energy >= skill_cost:
+                        self.reserve_skip_skill_id = skill.skill_id
+                    # After the pure filters and before IsReadyToCast and the preview's target lookups,
+                    # so a skipped skill never reserves a target lock.
+                    continue
             combat.is_targeting_enabled = not attacks_selected_target
             if preview and allegiance in _RESERVING_ALLEGIANCES:
                 # IsReadyToCast would reserve a cross-account lock: only check readiness and look the
@@ -402,6 +460,8 @@ class GameAdapter:
         allow_buffs: bool = True,
         blocked_skill_ids: Iterable[int] = (),
         rows: Optional[Sequence[CastRow]] = None,
+        reserve_mode: ReserveMode = ReserveMode.OFF,
+        reserve_fixed: int = 0,
     ) -> Optional[Decision]:
         # Blocked ids (the hex guard) must be passed on every call, the preview included:
         # ApplyBlockedSkillIDs replaces the set, so an omitted argument unblocks everything.
@@ -412,17 +472,27 @@ class GameAdapter:
             interrupt = interrupt_from_rows(rows)  # rows from cast_watch() with the same blocked ids: no rescan
         if interrupt is not None:
             return interrupt
-        return self._rotation_decision(preview, allow_buffs)
+        return self._rotation_decision(
+            preview=preview, allow_buffs=allow_buffs, reserve_mode=reserve_mode, reserve_fixed=reserve_fixed
+        )
 
     def interrupt_decision(self, max_tier: Tier, blocked_skill_ids: Iterable[int] = ()) -> Optional[Decision]:
         """Interrupt layer only (build mode): no rotation fallback, never reserves targets."""
         self._sync_combat(blocked_skill_ids)
         return choose_interrupt(self._enemy_casts(), self._interrupt_slots(), self._is_feasible, max_tier=max_tier)
 
-    def rotation_after_build(self, blocked_skill_ids: Sequence[int], allow_buffs: bool = True) -> Optional[Decision]:
+    def rotation_after_build(
+        self,
+        blocked_skill_ids: Sequence[int],
+        allow_buffs: bool = True,
+        reserve_mode: ReserveMode = ReserveMode.OFF,
+        reserve_fixed: int = 0,
+    ) -> Optional[Decision]:
         """Rotation over the skills the build does not own (actual plays only, never the preview)."""
         self._sync_combat(blocked_skill_ids)
-        return self._rotation_decision(preview=False, allow_buffs=allow_buffs)
+        return self._rotation_decision(
+            preview=False, allow_buffs=allow_buffs, reserve_mode=reserve_mode, reserve_fixed=reserve_fixed
+        )
 
     @staticmethod
     def punishing_hexes_on_player() -> tuple[ActiveHex, ...]:
@@ -446,6 +516,11 @@ class GameAdapter:
         """Every enemy cast in range with the interrupt that lands on it, read once (preview, list and key)."""
         self._sync_combat(blocked_skill_ids)
         return cast_rows(self._enemy_casts(), self._interrupt_slots(), self._is_feasible)
+
+    def energy_status(self, mode: ReserveMode, fixed: int) -> EnergyStatus:
+        """Energy, reserve and the "cannot interrupt" state for the window; call right after a sync (cast_watch)."""
+        maximum_energy = float(Agent.GetMaxEnergy(Player.GetAgentID()))
+        return make_energy_status(self._current_energy(), maximum_energy, mode, fixed, self._interrupt_costs())
 
     @staticmethod
     def agent_name(agent_id: int) -> str:
