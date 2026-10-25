@@ -6,6 +6,7 @@ This module must not import Py4GWCoreLib: it runs offline in unit tests.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 from typing import Optional
 
 from .model import CastRow
@@ -50,3 +51,19 @@ def cast_progress(cast: EnemyCast, seconds_since_read: float) -> CastProgress:
 
 def interrupt_text(row: CastRow, skill_name: str) -> str:
     return f"a tempo: {skill_name}" if row.slot is not None else "sem interrupt a tempo"
+
+
+def fit_text(text: str, max_width: float, measure: Callable[[str], float]) -> str:
+    """The text, or its longest prefix plus "..." that fits max_width (so a line never widens the window)."""
+    if measure(text) <= max_width:
+        return text
+    best = "..."
+    low, high = 1, len(text) - 1
+    while low <= high:  # binary search: the measure is a native call, keep it to a few per frame
+        middle = (low + high) // 2
+        candidate = text[:middle].rstrip() + "..."
+        if measure(candidate) <= max_width:
+            best, low = candidate, middle + 1
+        else:
+            high = middle - 1
+    return best

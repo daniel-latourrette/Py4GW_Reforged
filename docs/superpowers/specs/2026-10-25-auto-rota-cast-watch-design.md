@@ -41,6 +41,10 @@ a Auto Rota escolheria nesse instante. O jogador decide quando interromper.
 - **Linha de topo:**
   - `Interrupt (<tecla>): <skill> -> <inimigo> (<skill inimiga>)` na cor de
     "ligado" (`_ON_COLOR`), quando há um interrupt viável.
+    - A linha é cortada com `...` à largura da lista (`fit_text`). Sem isso, a
+      janela, que se ajusta ao conteúdo, mudaria de largura a cada alvo novo.
+    - Se a tecla de interrupt for igual à do ciclo ou à dos buffs, o que a deixa
+      sem efeito, mostra `(tecla ignorada)` em vez do nome da tecla.
   - Senão, `sem interrupt viavel`, a cinzento.
   - Com o ciclo ligado, acrescenta a cinzento
     `tecla em pausa: o ciclo esta ligado`.

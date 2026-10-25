@@ -29,6 +29,7 @@ from Widgets.Automation.Helpers.AutoRota.auto_rota_src.build_mode import Suggest
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.cast_watch import WATCH_MAX_ROWS
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.cast_watch import WatchLabels
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.cast_watch import cast_progress
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.cast_watch import fit_text
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.cast_watch import interrupt_text
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.decide import interrupt_from_rows
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.game_adapter import REASON_BUSY
@@ -246,9 +247,25 @@ def _store_watch(rows: list[CastRow]) -> None:
             )
         )
     decision = interrupt_from_rows(rows, Tier.OTHER)
+    key_text = ""
+    if decision is not None:
+        interrupt_name = _adapter.skill_name(decision.skill_id)
+        enemy_name = _adapter.agent_name(decision.target_id)
+        key_text = f"{interrupt_name} -> {enemy_name} ({_adapter.skill_name(decision.enemy_skill_id)})"
     _watch_rows, _watch_labels, _watch_read_s = rows, labels, time.monotonic()
     _watch_key_target = decision.target_id if decision is not None else 0
-    _watch_key_text = _adapter.describe(decision) if decision is not None else ""
+    _watch_key_text = key_text
+
+
+def _refresh_watch(rows: list[CastRow]) -> None:
+    """_store_watch, but a failed name or icon lookup shows "erro (ver consola)" instead of stale rows."""
+    global _watch_error
+    try:
+        _store_watch(rows)
+    except Exception as exc:
+        _watch_error = True
+        _store_watch([])  # no lookups for an empty read: clears the old rows and header
+        _log_error_once("cast watch labels", exc)
 
 
 def _on_interrupt_press() -> None:
@@ -262,15 +279,21 @@ def _on_interrupt_press() -> None:
         _ignore_press(f"interrupt: {reason}")
         return
     rows = _adapter.cast_watch(_guard_ids)  # fresh read: whether an interrupt lands depends on the instant
-    _store_watch(rows)
     # All tiers, also with a detected build: the build-mode limit defers to the build's own logic,
     # which only runs while the loop is on.
     decision = interrupt_from_rows(rows, Tier.OTHER)
     if decision is None:
         _ignore_press("nenhum interrupt pronto chega a tempo" if rows else "sem casts inimigos ao alcance")
+        _refresh_watch(rows)
         return
-    _adapter.execute(decision)
-    _push_history(f"1 toque: {_adapter.describe(decision)}")
+    _adapter.execute(decision)  # fire before the display lookups, so a failing one cannot cancel it
+    _refresh_watch(rows)
+    try:
+        fired_text = _adapter.describe(decision)
+    except Exception as exc:  # the interrupt was cast: never report it as an error
+        fired_text = f"skill {decision.skill_id} -> agente {decision.target_id}"
+        _log_error_once("interrupt history", exc)
+    _push_history(f"1 toque: {fired_text}")
 
 
 def _play_once() -> None:
@@ -405,7 +428,7 @@ def _update_preview() -> None:
     except Exception as exc:
         _watch_error = True
         _log_error_once("cast watch", exc)
-    _store_watch(rows or [])
+    _refresh_watch(rows or [])
     build_ids = _build_mode.blocked_skill_ids()
     build_paused = _build_mode.build_name is not None and build_paused_by_guard(_guard_ids, build_ids)
     if _build_mode.build_name is None or build_paused:
@@ -501,17 +524,27 @@ def _watch_size() -> tuple[float, float]:
     return (width, height)
 
 
+def _text_width(text: str) -> float:
+    return PyImGui.calc_text_size(text)[0]
+
+
 def _draw_cast_watch_body() -> int:
     """Header line and the fixed-size list; return the agent id of a clicked row (0: none)."""
-    key_label = _KEY_CHOICES[_interrupt_key_index][0]
+    size = _watch_size()
     if _watch_key_text:
-        PyImGui.text_colored(f"Interrupt ({key_label}): {_watch_key_text}", _ON_COLOR)
+        key_ignored = 2 in shadowed_positions((_key_index, _buff_key_index, _interrupt_key_index))
+        key_label = "tecla ignorada" if key_ignored else _KEY_CHOICES[_interrupt_key_index][0]
+        # Cut to the list width: an AlwaysAutoResize window would otherwise change width with every new target.
+        header = fit_text(f"Interrupt ({key_label}): {_watch_key_text}", size[0], _text_width)
+        PyImGui.text_colored(header, _ON_COLOR)
+    elif _watch_error:
+        PyImGui.text_colored("Interrupt: erro (ver consola)", _WARNING_COLOR)  # unknown, not "none viable"
     else:
         PyImGui.text_disabled("sem interrupt viavel")
     if _auto_on:
         PyImGui.text_disabled("tecla em pausa: o ciclo esta ligado")
     clicked = 0
-    PyImGui.begin_child("##auto_rota_casts_list", _watch_size(), True, 0)
+    PyImGui.begin_child("##auto_rota_casts_list", size, True, 0)
     try:
         if _watch_paused:
             PyImGui.text_disabled(f"em pausa ({_watch_paused})")

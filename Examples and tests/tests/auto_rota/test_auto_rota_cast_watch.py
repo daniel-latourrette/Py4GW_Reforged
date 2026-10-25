@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT))
 
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.cast_watch import CastProgress  # noqa: E402
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.cast_watch import cast_progress  # noqa: E402
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.cast_watch import fit_text  # noqa: E402
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.cast_watch import interrupt_text  # noqa: E402
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.model import CastKind  # noqa: E402
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.model import CastRow  # noqa: E402
@@ -83,6 +84,32 @@ class InterruptTextTests(unittest.TestCase):
         row = CastRow(cast=make_cast(), tier=Tier.OTHER, slot=None)
         observed = interrupt_text(row, "")
         self.assertEqual(observed, "sem interrupt a tempo", f"observed={observed!r}")
+
+
+def seven_px(text: str) -> float:
+    return 7.0 * len(text)  # a fixed-width stand-in for PyImGui.calc_text_size
+
+
+class FitTextTests(unittest.TestCase):
+    def check(self, text: str, max_width: float, expected: str) -> None:
+        observed = fit_text(text, max_width, seven_px)
+        self.assertEqual(
+            observed, expected, f"fit_text({text!r}, {max_width}) expected={expected!r} observed={observed!r}"
+        )
+
+    def test_text_that_fits_is_unchanged(self) -> None:
+        self.check("Interrupt (F3): Cry", 140.0, "Interrupt (F3): Cry")
+
+    def test_long_text_keeps_the_longest_prefix_that_fits_with_an_ellipsis(self) -> None:
+        # 12 characters fit in 84 px: 9 of text plus "...".
+        self.check("Cry of Frustration", 84.0, "Cry of Fr...")
+
+    def test_trailing_spaces_before_the_ellipsis_are_dropped(self) -> None:
+        # 10 characters fit: "Cry of " + "..." would, but the space before the ellipsis is dropped.
+        self.check("Cry of Frustration", 70.0, "Cry of...")
+
+    def test_a_width_below_the_ellipsis_still_returns_it(self) -> None:
+        self.check("Cry of Frustration", 5.0, "...")
 
 
 if __name__ == "__main__":
