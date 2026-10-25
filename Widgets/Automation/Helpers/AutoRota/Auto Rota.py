@@ -27,8 +27,14 @@ from Widgets.Automation.Helpers.AutoRota.auto_rota_src.build_mode import Suggest
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.game_adapter import REASON_BUSY
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.game_adapter import STOP_REASONS
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.game_adapter import GameAdapter
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.hex_guard import build_paused_by_guard
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.hex_guard import guard_reason
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.hex_guard import guarded_skill_ids
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.hex_guard import history_text
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.hex_guard import warning_text
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.key_edge import KeyEdge
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.key_edge import next_auto_state
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.model import ActiveHex
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.model import Decision
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.priorities import BUILD_MODE_MAX_TIER
 
@@ -38,6 +44,7 @@ MODULE_ICON = "Assets/Textures/Module_Icons/Combat.png"
 _SETTINGS_SECTION = "AutoRota"
 _SETTINGS_HOTKEY = "hotkey"
 _SETTINGS_BUFF_HOTKEY = "buff_hotkey"
+_SETTINGS_HEX_GUARD = "hex_guard"
 _PREVIEW_INTERVAL_MS = 100
 _HISTORY_SIZE = 5
 _HEARTBEAT_MAX_S = 0.5
@@ -71,6 +78,10 @@ _buff_key_edge = KeyEdge()
 _ignored_text = ""
 _auto_on = False
 _buffs_on = False  # always starts off: buffs are an explicit opt-in per session
+_guard_on = True  # loaded from the settings together with the keys; on by default
+_guard_hexes: tuple[ActiveHex, ...] = ()
+_guard_ids: frozenset[int] = frozenset()
+_guard_error = False
 _load_job: Optional[Generator[Any, Any, Any]] = None
 _load_name = ""
 _load_started_s = 0.0
@@ -133,6 +144,30 @@ def _stop_reason() -> Optional[str]:
     return reason if reason in STOP_REASONS else None
 
 
+def _update_guard() -> None:
+    """Read the punishing hexes on the player once per frame and derive the skills the guard blocks."""
+    global _guard_hexes, _guard_ids, _guard_error
+    previous = {active.skill_id for active in _guard_hexes}
+    if not _guard_on:
+        _guard_hexes, _guard_ids, _guard_error = (), frozenset(), False
+        return
+    try:
+        hexes = _adapter.punishing_hexes_on_player()
+        guarded = guarded_skill_ids(_adapter.bar_skills(), hexes) if hexes else frozenset[int]()
+    except Exception as exc:
+        # Fail open: an unreadable effects list must not freeze the loop; the window says so.
+        _guard_hexes, _guard_ids, _guard_error = (), frozenset(), True
+        _log_error_once("hex guard", exc)
+        return
+    _guard_hexes, _guard_ids, _guard_error = hexes, guarded, False
+    if _auto_on:
+        current = {active.skill_id for active in hexes}
+        for skill_id in sorted(current - previous):
+            _push_history(history_text(skill_id, started=True))
+        for skill_id in sorted(previous - current):
+            _push_history(history_text(skill_id, started=False))
+
+
 def _press_allowed() -> bool:
     if not PySystem.window.is_window_active():
         _ignore_press("Guild Wars sem foco")
@@ -165,13 +200,15 @@ def _play_once() -> None:
     """One play while the toggle is on; silent when busy or when there is nothing to do."""
     if _build_mode.busy or _adapter.blocker() is not None:
         return
-    if _build_mode.build_name is None:
-        decision = _adapter.next_decision(allow_buffs=_buffs_on)
+    # A build pass cannot skip single skills: while the guard blocks one of the build's skills, play the
+    # generic rotation (all interrupt tiers, then HeroAI) over the skills the guard still allows.
+    if _build_mode.build_name is None or build_paused_by_guard(_guard_ids, _build_mode.blocked_skill_ids()):
+        decision = _adapter.next_decision(allow_buffs=_buffs_on, blocked_skill_ids=_guard_ids)
         if decision is not None:
             _adapter.execute(decision)
             _push_history(_adapter.describe(decision))
         return
-    interrupt = _adapter.interrupt_decision(BUILD_MODE_MAX_TIER)
+    interrupt = _adapter.interrupt_decision(BUILD_MODE_MAX_TIER, blocked_skill_ids=_guard_ids)
     if interrupt is not None:
         _adapter.execute(interrupt)
         _push_history(_adapter.describe(interrupt))
@@ -194,7 +231,8 @@ def _finish_build_pass(outcome: BuildPassOutcome) -> None:
         return
     if outcome.cast is not None or not _auto_on or _adapter.blocker() is not None:
         return
-    decision = _adapter.rotation_after_build(_build_mode.blocked_skill_ids(), allow_buffs=_buffs_on)
+    blocked = set(_build_mode.blocked_skill_ids()) | _guard_ids
+    decision = _adapter.rotation_after_build(sorted(blocked), allow_buffs=_buffs_on)
     if decision is not None:
         _adapter.execute(decision)
         _push_history(_adapter.describe(decision))
@@ -280,16 +318,19 @@ def _update_preview() -> None:
     if reason is not None and reason != REASON_BUSY:
         _preview_text = f"em pausa ({reason})"
         return
-    if _build_mode.build_name is None:
-        decision = _adapter.next_decision(preview=True, allow_buffs=_buffs_on)
-        _preview_text = _adapter.describe(decision) if decision is not None else "nada a fazer"
+    build_ids = _build_mode.blocked_skill_ids()
+    build_paused = _build_mode.build_name is not None and build_paused_by_guard(_guard_ids, build_ids)
+    if _build_mode.build_name is None or build_paused:
+        decision = _adapter.next_decision(preview=True, allow_buffs=_buffs_on, blocked_skill_ids=_guard_ids)
+        text = _adapter.describe(decision) if decision is not None else "nada a fazer"
+        _preview_text = f"build em pausa ({guard_reason(_guard_hexes)}): {text}" if build_paused else text
         return
-    interrupt = _adapter.interrupt_decision(BUILD_MODE_MAX_TIER)
+    interrupt = _adapter.interrupt_decision(BUILD_MODE_MAX_TIER, blocked_skill_ids=_guard_ids)
     _preview_text = _adapter.describe(interrupt) if interrupt is not None else "jogada da build (decidida ao jogar)"
 
 
 def _draw_window() -> None:
-    global _key_index, _key_edge, _buff_key_index, _buff_key_edge
+    global _key_index, _key_edge, _buff_key_index, _buff_key_edge, _guard_on
     opened = PyImGui.begin(MODULE_NAME, int(PyImGui.WindowFlags.AlwaysAutoResize))
     try:
         if opened:
@@ -303,6 +344,10 @@ def _draw_window() -> None:
                 PyImGui.text_colored(f"Buffs: LIGADOS  ({buff_label})", _ON_COLOR)
             else:
                 PyImGui.text(f"Buffs: DESLIGADOS  ({buff_label})")
+            if _guard_error:
+                PyImGui.text_colored("Guarda: erro a ler efeitos (ver consola)", _WARNING_COLOR)
+            for active in _guard_hexes:
+                PyImGui.text_colored(warning_text(active), _WARNING_COLOR)
             if _heroai_conflict:
                 PyImGui.text_colored("HeroAI com combate ligado: Auto Rota em pausa", _WARNING_COLOR)
             build_name = _build_mode.build_name
@@ -322,6 +367,11 @@ def _draw_window() -> None:
                 _buff_key_edge = KeyEdge()
             if _buff_key_index == _key_index:
                 PyImGui.text_colored("As duas teclas sao iguais: a tecla dos buffs e ignorada", _WARNING_COLOR)
+            new_guard_on = PyImGui.checkbox("Guarda de hexes", _guard_on)
+            if new_guard_on != _guard_on:
+                _guard_on = new_guard_on
+                _settings.set_bool(_SETTINGS_SECTION, _SETTINGS_HEX_GUARD, new_guard_on)
+                _push_history("Guarda de hexes LIGADA" if new_guard_on else "Guarda de hexes DESLIGADA")
             if _ignored_text:
                 PyImGui.text(f"Ultimo toque ignorado: {_ignored_text}")
             PyImGui.separator()
@@ -347,6 +397,7 @@ def tooltip() -> None:
     PyImGui.text("Excecao: com build detetada, a jogada da build escolhe o proprio alvo.")
     PyImGui.text("Desliga ao morrer, mudar de mapa ou ligar o combate do HeroAI.")
     PyImGui.text("A tecla dos buffs liga/desliga o uso de buffs (Mantras, Channeling, Ether Signet...).")
+    PyImGui.text("Guarda de hexes: pausa as skills que um hex em ti castiga (ex.: Backfire -> spells).")
     PyImGui.end_tooltip()
 
 
@@ -357,7 +408,7 @@ def on_disable() -> None:
 
 
 def main() -> None:
-    global _key_index, _buff_key_index, _key_loaded, _main_tick_s, _preview_text
+    global _key_index, _buff_key_index, _key_loaded, _main_tick_s, _preview_text, _guard_on
     try:
         if not Routines.Checks.Map.MapValid():
             _set_auto(False, "mudanca de mapa")
@@ -377,11 +428,16 @@ def main() -> None:
         if not _key_loaded:
             _key_index = _load_key_index(_SETTINGS_HOTKEY, Key.VK_OEM_3)
             _buff_key_index = _load_key_index(_SETTINGS_BUFF_HOTKEY, Key.VK_F2)
+            _guard_on = _settings.get_bool(_SETTINGS_SECTION, _SETTINGS_HEX_GUARD, True)
             _key_loaded = True
         try:
             _build_mode.refresh()
         except Exception as exc:
             _log_error_once("build", exc)
+        try:
+            _update_guard()  # before the play and the preview, so a fresh hex is seen on the frame it lands
+        except Exception as exc:
+            _log_error_once("hex guard", exc)
         if _key_edge.update(_is_key_down(_KEY_CHOICES[_key_index][1].value)):
             try:
                 _on_toggle_press()
