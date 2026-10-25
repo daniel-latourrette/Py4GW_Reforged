@@ -38,12 +38,15 @@ from Py4GWCoreLib.py4gwcorelib_src.Console import Console
 from Py4GWCoreLib.py4gwcorelib_src.Console import ConsoleLog
 from Py4GWCoreLib.py4gwcorelib_src.WidgetManager import get_widget_handler
 
+from .decide import cast_rows
 from .decide import choose_interrupt
+from .decide import interrupt_from_rows
 from .hex_guard import active_punishing_hexes
 from .model import ActionKind
 from .model import ActiveHex
 from .model import BarSkill
 from .model import CastKind
+from .model import CastRow
 from .model import Decision
 from .model import EnemyCast
 from .model import InterruptReach
@@ -226,7 +229,10 @@ class GameAdapter:
             try:
                 if not Agent.IsAlive(agent_id) or not Agent.IsCasting(agent_id):
                     continue
-                if Utils.Distance(player_xy, Agent.GetXY(agent_id)) > Range.Longbow.value:
+                # Spellcast is the widest reach of any interrupt: is_interrupt_feasible's range gate truncates the
+                # distance to int and rejects anything farther. Mirror it exactly, so farther casts (never chosen)
+                # are skipped and the cast watch lists exactly the casts the loop considers.
+                if int(Utils.Distance(player_xy, Agent.GetXY(agent_id))) > Range.Spellcast.value:
                     continue
                 skill_id = Agent.GetCastingSkillID(agent_id)
                 if skill_id == 0:
@@ -245,7 +251,8 @@ class GameAdapter:
 
     def _describe_cast(self, agent_id: int, skill_id: int) -> EnemyCast:
         activation_ms = int((GLOBAL_CACHE.Skill.Data.GetActivation(skill_id) or 0.0) * 1000)
-        elapsed_ms = cast_observer.elapsed_ms(agent_id, skill_id) or 0
+        observed_ms = cast_observer.elapsed_ms(agent_id, skill_id)  # None until the observer has seen the cast
+        elapsed_ms = observed_ms or 0
         nature = custom_skill_data_handler.get_skill(skill_id).Nature
         attribute_id = int(GLOBAL_CACHE.Skill.Attribute.GetAttribute(skill_id))
         return EnemyCast(
@@ -257,6 +264,7 @@ class GameAdapter:
             is_elite=bool(GLOBAL_CACHE.Skill.Flags.IsElite(skill_id)),
             activation_ms=activation_ms,
             remaining_ms=max(0, activation_ms - elapsed_ms),
+            elapsed_ms=observed_ms,
         )
 
     def _interrupt_slots(self) -> list[InterruptSlot]:
@@ -389,12 +397,19 @@ class GameAdapter:
         return None
 
     def next_decision(
-        self, preview: bool = False, allow_buffs: bool = True, blocked_skill_ids: Iterable[int] = ()
+        self,
+        preview: bool = False,
+        allow_buffs: bool = True,
+        blocked_skill_ids: Iterable[int] = (),
+        rows: Optional[Sequence[CastRow]] = None,
     ) -> Optional[Decision]:
         # Blocked ids (the hex guard) must be passed on every call, the preview included:
         # ApplyBlockedSkillIDs replaces the set, so an omitted argument unblocks everything.
         self._sync_combat(blocked_skill_ids)
-        interrupt = choose_interrupt(self._enemy_casts(), self._interrupt_slots(), self._is_feasible)
+        if rows is None:
+            interrupt = choose_interrupt(self._enemy_casts(), self._interrupt_slots(), self._is_feasible)
+        else:
+            interrupt = interrupt_from_rows(rows)  # rows from cast_watch() with the same blocked ids: no rescan
         if interrupt is not None:
             return interrupt
         return self._rotation_decision(preview, allow_buffs)
@@ -426,6 +441,24 @@ class GameAdapter:
             if skill_id != 0:
                 skills.append(BarSkill(skill_id=skill_id, kind=_action_kind(skill_id)))
         return skills
+
+    def cast_watch(self, blocked_skill_ids: Iterable[int] = ()) -> list[CastRow]:
+        """Every enemy cast in range with the interrupt that lands on it, read once (preview, list and key)."""
+        self._sync_combat(blocked_skill_ids)
+        return cast_rows(self._enemy_casts(), self._interrupt_slots(), self._is_feasible)
+
+    @staticmethod
+    def agent_name(agent_id: int) -> str:
+        return Agent.GetNameByID(agent_id) or f"agente {agent_id}"  # names decode asynchronously
+
+    @staticmethod
+    def skill_name(skill_id: int) -> str:
+        return _skill_name(skill_id)
+
+    @staticmethod
+    def skill_icon_path(skill_id: int) -> str:
+        """Relative icon path for ImGui.DrawTexture, or "" when the skill has no icon."""
+        return GLOBAL_CACHE.Skill.ExtraData.GetTexturePath(skill_id)
 
     def note_external_cast(self) -> None:
         """Start the debounce after a cast queued outside execute() (e.g. by a build pass)."""
