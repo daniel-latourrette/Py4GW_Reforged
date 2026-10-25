@@ -69,9 +69,10 @@ condição aplicável da lista seguinte o diz, por esta ordem:
 3. A skill está isenta: não gasta. As isentas são:
    - as de custo real 0 ou menos;
    - as que o HeroAI marca com `Nature` EnergyBuff (Ether Signet, por exemplo);
-   - as que dão energia, numa lista explícita, porque o HeroAI as marca como
-     ofensivas: Drain Enchantment (68), Energy Drain (79), Energy Tap (80) e
-     Waste Not, Want Not (1995).
+   - as que dão energia, numa lista explícita, porque o HeroAI não as marca como
+     EnergyBuff: Drain Enchantment (68, marcada Enchantment_Removal), Energy
+     Drain (79) e Energy Tap (80), ambas ofensivas. Waste Not, Want Not (1995)
+     já é EnergyBuff e fica na lista só por segurança.
 4. Barra cheia (energia atual igual ou acima da máxima): não gasta. Assim
    nenhuma skill fica presa para sempre quando custo + reserva > energia máxima.
 5. Senão, gasta quando `energia atual − custo < reserva efetiva`.

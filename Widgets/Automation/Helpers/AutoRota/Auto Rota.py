@@ -582,6 +582,16 @@ def _text_width(text: str) -> float:
     return PyImGui.calc_text_size(text)[0]
 
 
+def _draw_cannot_interrupt_line() -> None:
+    """The warning, or a blank line in its place, so what is drawn below does not jump when it toggles."""
+    if _energy_status is None:
+        return
+    if _energy_status.cannot_interrupt:
+        PyImGui.text_colored(CANNOT_INTERRUPT_TEXT, _WARNING_COLOR)
+    else:
+        PyImGui.new_line()
+
+
 def _draw_cast_watch_body() -> int:
     """Header line and the fixed-size list; return the agent id of a clicked row (0: none)."""
     size = _watch_size()
@@ -597,8 +607,7 @@ def _draw_cast_watch_body() -> int:
         PyImGui.text_disabled("sem interrupt viavel")
     if _auto_on:
         PyImGui.text_disabled("tecla em pausa: o ciclo esta ligado")
-    if _energy_status is not None and _energy_status.cannot_interrupt:
-        PyImGui.text_colored(CANNOT_INTERRUPT_TEXT, _WARNING_COLOR)
+    _draw_cannot_interrupt_line()
     clicked = 0
     PyImGui.begin_child("##auto_rota_casts_list", size, True, 0)
     try:
@@ -650,8 +659,7 @@ def _draw_window() -> None:
                 PyImGui.text(f"Buffs: DESLIGADOS  ({buff_label})")
             if _energy_text:
                 PyImGui.text(_energy_text)
-            if _energy_status is not None and _energy_status.cannot_interrupt:
-                PyImGui.text_colored(CANNOT_INTERRUPT_TEXT, _WARNING_COLOR)
+            _draw_cannot_interrupt_line()
             if _guard_error:
                 PyImGui.text_colored("Guarda: erro a ler efeitos (ver consola)", _WARNING_COLOR)
             for active in _guard_hexes:

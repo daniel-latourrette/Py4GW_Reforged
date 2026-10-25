@@ -28,8 +28,9 @@ MODE_LABELS: dict[ReserveMode, str] = {
 RESERVE_FIXED_DEFAULT = 10
 RESERVE_FIXED_MAX = 25
 
-# HeroAI tags these Offensive although they give energy back (Drain Enchantment, Energy Drain, Energy Tap,
-# Waste Not, Want Not; ids checked in Py4GWCoreLib/skill_descriptions.json): blocking them would cut the way out.
+# These give energy back but HeroAI does not tag them EnergyBuff (Energy Drain and Energy Tap are Offensive,
+# Drain Enchantment is Enchantment_Removal), so blocking them would cut the way out. Waste Not, Want Not is
+# already EnergyBuff and stays as a safeguard. Ids checked in Py4GWCoreLib/skill_descriptions.json.
 ENERGY_GAIN_SKILL_IDS: frozenset[int] = frozenset({68, 79, 80, 1995})
 # Ether Lord: "You lose all Energy", so a cost-based check would let it empty the reserve.
 DRAINS_ALL_ENERGY_SKILL_IDS: frozenset[int] = frozenset({41})
