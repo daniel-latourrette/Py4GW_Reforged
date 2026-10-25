@@ -10,6 +10,7 @@ instance, never on the CombatClass that HeroAI itself drives.
 from __future__ import annotations
 
 import time
+from typing import Iterable
 from typing import Optional
 from typing import Sequence
 
@@ -21,6 +22,7 @@ from Py4GWCoreLib import Player
 from Py4GWCoreLib import Range
 from Py4GWCoreLib import Routines
 from Py4GWCoreLib import Utils
+from Py4GWCoreLib.Effect import Effects
 from Py4GWCoreLib.enums_src.GameData_enums import Attribute
 from Py4GWCoreLib.enums_src.GameData_enums import SkillType
 from Py4GWCoreLib.GlobalCache.HexRemovalPriority import get_hexed_ally_for_removal
@@ -37,6 +39,10 @@ from Py4GWCoreLib.py4gwcorelib_src.Console import ConsoleLog
 from Py4GWCoreLib.py4gwcorelib_src.WidgetManager import get_widget_handler
 
 from .decide import choose_interrupt
+from .hex_guard import active_punishing_hexes
+from .model import ActionKind
+from .model import ActiveHex
+from .model import BarSkill
 from .model import CastKind
 from .model import Decision
 from .model import EnemyCast
@@ -154,6 +160,18 @@ def _cast_kind(skill_id: int) -> CastKind:
     return CastKind.OTHER
 
 
+def _action_kind(skill_id: int) -> ActionKind:
+    """Kind of a skill on the player's own bar, for the punishing-hex guard (signets are OTHER, not spells)."""
+    skill_type, _ = GLOBAL_CACHE.Skill.GetType(skill_id)
+    if skill_type in _SPELL_TYPES:
+        return ActionKind.SPELL
+    if skill_type == SkillType.Attack.value:
+        return ActionKind.ATTACK
+    if skill_type in (SkillType.Shout.value, SkillType.Chant.value):
+        return ActionKind.SHOUT_OR_CHANT
+    return ActionKind.OTHER
+
+
 def _skill_name(skill_id: int) -> str:
     name = GLOBAL_CACHE.Skill.GetName(skill_id)
     return name.replace("_", " ") if name else f"skill {skill_id}"
@@ -166,7 +184,7 @@ class GameAdapter:
         self._last_execute_s: float = 0.0
         self._logged_failures: set[tuple[int, int]] = set()
 
-    def _sync_combat(self, blocked_skill_ids: Sequence[int] = ()) -> CombatClass:
+    def _sync_combat(self, blocked_skill_ids: Iterable[int] = ()) -> CombatClass:
         """Rebuild the private CombatClass from the live skillbar right before a decision."""
         combat = self._combat
         combat.Update(self._cached_data)
@@ -370,22 +388,44 @@ class GameAdapter:
             )
         return None
 
-    def next_decision(self, preview: bool = False, allow_buffs: bool = True) -> Optional[Decision]:
-        self._sync_combat()
+    def next_decision(
+        self, preview: bool = False, allow_buffs: bool = True, blocked_skill_ids: Iterable[int] = ()
+    ) -> Optional[Decision]:
+        # Blocked ids (the hex guard) must be passed on every call, the preview included:
+        # ApplyBlockedSkillIDs replaces the set, so an omitted argument unblocks everything.
+        self._sync_combat(blocked_skill_ids)
         interrupt = choose_interrupt(self._enemy_casts(), self._interrupt_slots(), self._is_feasible)
         if interrupt is not None:
             return interrupt
         return self._rotation_decision(preview, allow_buffs)
 
-    def interrupt_decision(self, max_tier: Tier) -> Optional[Decision]:
+    def interrupt_decision(self, max_tier: Tier, blocked_skill_ids: Iterable[int] = ()) -> Optional[Decision]:
         """Interrupt layer only (build mode): no rotation fallback, never reserves targets."""
-        self._sync_combat()
+        self._sync_combat(blocked_skill_ids)
         return choose_interrupt(self._enemy_casts(), self._interrupt_slots(), self._is_feasible, max_tier=max_tier)
 
     def rotation_after_build(self, blocked_skill_ids: Sequence[int], allow_buffs: bool = True) -> Optional[Decision]:
         """Rotation over the skills the build does not own (actual plays only, never the preview)."""
         self._sync_combat(blocked_skill_ids)
         return self._rotation_decision(preview=False, allow_buffs=allow_buffs)
+
+    @staticmethod
+    def punishing_hexes_on_player() -> tuple[ActiveHex, ...]:
+        """Punishing hexes on the local player, from the native effects list (not the multibox buff mirror)."""
+        effects = Effects.GetEffects(Player.GetAgentID())
+        return active_punishing_hexes(
+            (int(effect.skill_id), int(effect.time_remaining), float(effect.duration)) for effect in effects
+        )
+
+    @staticmethod
+    def bar_skills() -> list[BarSkill]:
+        """The player's bar with each skill's kind, for the punishing-hex guard (empty slots skipped)."""
+        skills: list[BarSkill] = []
+        for slot in range(1, MAX_SKILLS + 1):
+            skill_id = int(GLOBAL_CACHE.SkillBar.GetSkillIDBySlot(slot) or 0)
+            if skill_id != 0:
+                skills.append(BarSkill(skill_id=skill_id, kind=_action_kind(skill_id)))
+        return skills
 
     def note_external_cast(self) -> None:
         """Start the debounce after a cast queued outside execute() (e.g. by a build pass)."""
