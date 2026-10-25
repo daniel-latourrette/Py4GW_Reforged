@@ -17,7 +17,8 @@ Pipeline (encoded codepoints → display text):
      base_char=0 + bpc=16 means raw UTF-16LE.
 
   4. Player names bypass all of this — codepoint prefix 0xBA9 followed
-     by inline ASCII.
+     by inline ASCII. So does a string that is one literal-text block,
+     0x0108 0x0107 <escaped text> 0x0001 (e.g. mercenary hero names).
 
   5. Results are cached by codepoint tuple. Grammar tags ([M], [F], etc.)
      are stripped in postprocessing.
@@ -907,6 +908,40 @@ def _decode_and_cache(raw: bytes) -> None:
 
 _PLAYER_PREFIX = b'\xa9\x0b'  # 0xBA9 as little-endian uint16
 
+# The game's literal-text block: 0x0108 0x0107 <text> 0x0001, with '\', '[' and ']' escaped by a
+# backslash (GWUI._encode_text_literal writes the same block). Without this, 0x0108 reads as
+# string-table index 8, the bare template "%str1%".
+_LITERAL_PREFIX = b'\x08\x01\x07\x01'
+_LITERAL_ESCAPE = 0x5C  # backslash
+
+
+def _decode_literal_block(raw: bytes) -> Optional[str]:
+    """Text of a raw string that is exactly one literal block, else None (left to the general decoder)."""
+    if raw[:4] != _LITERAL_PREFIX:
+        return None
+    codepoints = struct.unpack_from(f'<{len(raw) >> 1}H', raw)
+    if 0 in codepoints:
+        codepoints = codepoints[: codepoints.index(0)]  # like _decode_sync: nothing after the null counts
+    units: list[int] = []
+    escaped = False
+    for index in range(2, len(codepoints)):
+        cp = codepoints[index]
+        if cp == 1:
+            if index + 1 < len(codepoints):
+                return None  # more markup follows the block (e.g. a 0x0002 separator)
+            break
+        if cp < 0x20:
+            return None  # control codepoints belong to the general decoder
+        if escaped:
+            units.append(cp)
+            escaped = False
+        elif cp == _LITERAL_ESCAPE:
+            escaped = True
+        else:
+            units.append(cp)
+    # Decode the UTF-16 units together so surrogate pairs become one (non-BMP) character.
+    return struct.pack(f'<{len(units)}H', *units).decode('utf-16-le', 'replace')
+
 
 def decode(raw: bytes, language: Optional[int] = None) -> str:
     """Decode raw encoded-name bytes to a display string.
@@ -927,6 +962,11 @@ def decode(raw: bytes, language: Optional[int] = None) -> str:
                 break
             chars.append(lo)
         return bytes(chars).decode('ascii', 'ignore')
+
+    # Literal text: no string table, no async round, no markup postprocessing (it is plain text).
+    literal = _decode_literal_block(raw)
+    if literal is not None:
+        return literal
 
     requested_language = _loaded_language if language is None else int(language)
     if language is not None and requested_language != _loaded_language:
