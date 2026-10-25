@@ -2,8 +2,9 @@
 
 Data: 2026-10-24 · Estado: implementado, por validar no jogo · Branch: `feature/auto-rota`
 
-Ver também: `docs/superpowers/specs/2026-10-25-auto-rota-hex-guard-design.md` (guarda contra hexes punitivos)
-e `docs/superpowers/specs/2026-10-25-auto-rota-cast-watch-design.md` (vigia de casts e interrupt de um toque).
+Ver também: `docs/superpowers/specs/2026-10-25-auto-rota-hex-guard-design.md` (guarda contra hexes punitivos),
+`docs/superpowers/specs/2026-10-25-auto-rota-cast-watch-design.md` (vigia de casts e interrupt de um toque)
+e `docs/superpowers/specs/2026-10-25-auto-rota-energy-reserve-design.md` (reserva de energia para interrupts).
 
 ## Objetivo
 
