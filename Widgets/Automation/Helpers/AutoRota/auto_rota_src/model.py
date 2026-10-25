@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import IntEnum
+from typing import Optional
 
 
 class CastKind(IntEnum):
@@ -58,3 +59,24 @@ class BuildCandidate:
     primary_is_mesmer: bool
     is_fallback_candidate: bool  # e.g. the generic HeroAI build GetBestBuild returns when nothing matches
     overrides_skill_casting: bool  # e.g. farm builds with their own multi-cast ProcessSkillCasting
+
+
+class ActionKind(IntEnum):
+    """What a skill on the player's own bar does, as far as punishing hexes are concerned."""
+
+    SPELL = 0
+    ATTACK = 1
+    SHOUT_OR_CHANT = 2
+    OTHER = 3  # signets, stances, glyphs, rituals, preparations, forms, pet attacks...
+
+
+@dataclass(frozen=True)
+class BarSkill:
+    skill_id: int  # 0 = empty slot
+    kind: ActionKind
+
+
+@dataclass(frozen=True)
+class ActiveHex:
+    skill_id: int
+    remaining_ms: Optional[int]  # None when the game reports an implausible time ("?" in the window)
