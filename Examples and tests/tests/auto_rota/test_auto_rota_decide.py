@@ -13,18 +13,23 @@ from typing import Optional
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.decide import FeasibilityCheck  # noqa: E402
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.decide import can_hit  # noqa: E402
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.decide import cast_rows  # noqa: E402
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.decide import choose_interrupt  # noqa: E402
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.decide import classify  # noqa: E402
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.decide import interrupt_from_rows  # noqa: E402
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.decide import is_eligible_build  # noqa: E402
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.key_edge import KeyEdge  # noqa: E402
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.key_edge import next_auto_state  # noqa: E402
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.key_edge import shadowed_positions  # noqa: E402
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.model import BuildCandidate  # noqa: E402
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.model import CastKind  # noqa: E402
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.model import Decision  # noqa: E402
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.model import EnemyCast  # noqa: E402
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.model import InterruptReach  # noqa: E402
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.model import InterruptSlot  # noqa: E402
+from Widgets.Automation.Helpers.AutoRota.auto_rota_src.priorities import TIER_COLORS  # noqa: E402
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.priorities import TIER_LABELS  # noqa: E402
 from Widgets.Automation.Helpers.AutoRota.auto_rota_src.priorities import Tier  # noqa: E402
 
@@ -76,6 +81,10 @@ class ClassifyTests(unittest.TestCase):
     def test_every_tier_has_a_label(self) -> None:
         missing = set(Tier) - set(TIER_LABELS)
         self.assertEqual(missing, set(), f"TIER_LABELS is missing labels for tiers: {sorted(t.name for t in missing)}")
+
+    def test_every_tier_has_a_color(self) -> None:
+        missing = set(Tier) - set(TIER_COLORS)
+        self.assertEqual(missing, set(), f"TIER_COLORS is missing colors for tiers: {sorted(t.name for t in missing)}")
 
 
 class CanHitTests(unittest.TestCase):
@@ -234,6 +243,142 @@ class ChooseInterruptTests(unittest.TestCase):
         self.assert_choice(observed, 10, 500, "OTHER cast with default limit")
 
 
+def only_agent(agent_id: int) -> FeasibilityCheck:
+    def check(_slot: InterruptSlot, cast: EnemyCast) -> bool:
+        return cast.agent_id == agent_id
+
+    return check
+
+
+def not_agent(agent_id: int) -> FeasibilityCheck:
+    def check(_slot: InterruptSlot, cast: EnemyCast) -> bool:
+        return cast.agent_id != agent_id
+
+    return check
+
+
+def only_skill(skill_id: int) -> FeasibilityCheck:
+    def check(slot: InterruptSlot, _cast: EnemyCast) -> bool:
+        return slot.skill_id == skill_id
+
+    return check
+
+
+class CastRowsTests(unittest.TestCase):
+    # The ChooseInterruptTests situations, so the list and the one-tap key provably pick what the loop picks.
+    SCENARIOS: list[tuple[str, list[EnemyCast], list[InterruptSlot], FeasibilityCheck]] = [
+        ("no casts", [], [make_slot()], always),
+        ("no slots", [make_cast()], [], always),
+        (
+            "resurrection vs healing",
+            [make_cast(agent_id=10, is_healing=True), make_cast(agent_id=20, is_resurrection=True)],
+            [make_slot()],
+            always,
+        ),
+        (
+            "same tier, earlier finish",
+            [
+                make_cast(agent_id=10, is_healing=True, remaining_ms=900),
+                make_cast(agent_id=20, is_healing=True, remaining_ms=400),
+            ],
+            [make_slot()],
+            always,
+        ),
+        (
+            "spell-only interrupt vs attack",
+            [make_cast(agent_id=10, kind=CastKind.ATTACK, is_elite=True)],
+            [make_slot(reach=InterruptReach.SPELL_OR_CHANT)],
+            always,
+        ),
+        (
+            "first feasible slot",
+            [make_cast(agent_id=10)],
+            [make_slot(slot=0, bar_slot=1, skill_id=501), make_slot(slot=1, bar_slot=2, skill_id=502)],
+            only_skill(502),
+        ),
+        (
+            "resurrection out of reach",
+            [make_cast(agent_id=10, is_resurrection=True), make_cast(agent_id=20, is_elite=True)],
+            [make_slot()],
+            not_agent(10),
+        ),
+        (
+            "tier outranks time",
+            [
+                make_cast(agent_id=10, is_healing=True, remaining_ms=200),
+                make_cast(agent_id=20, is_resurrection=True, remaining_ms=1500),
+            ],
+            [make_slot()],
+            always,
+        ),
+        (
+            "exact tie",
+            [make_cast(agent_id=10, is_elite=True), make_cast(agent_id=20, is_elite=True)],
+            [make_slot()],
+            always,
+        ),
+        (
+            "long cast and infeasible healing",
+            [make_cast(agent_id=10, activation_ms=3000), make_cast(agent_id=20, is_healing=True)],
+            [make_slot()],
+            not_agent(20),
+        ),
+        (
+            "elite at the limit vs earlier other",
+            [make_cast(agent_id=20, remaining_ms=100), make_cast(agent_id=10, is_elite=True, remaining_ms=900)],
+            [make_slot()],
+            always,
+        ),
+        (
+            "every tier present",
+            [
+                make_cast(agent_id=50),
+                make_cast(agent_id=40, activation_ms=2500),
+                make_cast(agent_id=30, is_elite=True),
+                make_cast(agent_id=20, is_healing=True),
+                make_cast(agent_id=10, is_resurrection=True),
+            ],
+            [make_slot()],
+            only_agent(40),
+        ),
+    ]
+
+    def test_rows_give_the_same_decision_as_choose_interrupt_for_every_tier(self) -> None:
+        for label, casts, slots, feasible in self.SCENARIOS:
+            for max_tier in Tier:
+                expected = choose_interrupt(casts, slots, feasible, max_tier=max_tier)
+                observed = interrupt_from_rows(cast_rows(casts, slots, feasible), max_tier)
+                self.assertEqual(
+                    observed, expected, f"{label}, max_tier={max_tier.name}: expected={expected} observed={observed}"
+                )
+
+    def test_rows_keep_the_choice_order_and_casts_without_a_slot(self) -> None:
+        casts = [
+            make_cast(agent_id=30, remaining_ms=100),
+            make_cast(agent_id=10, is_healing=True),
+            make_cast(agent_id=20, kind=CastKind.ATTACK, is_resurrection=True),
+        ]
+        rows = cast_rows(casts, [make_slot(skill_id=501, reach=InterruptReach.SPELL)], always)
+        observed = [(row.cast.agent_id, row.tier, row.slot.skill_id if row.slot else None) for row in rows]
+        expected = [(20, Tier.RESURRECTION, None), (10, Tier.HEALING, 501), (30, Tier.OTHER, 501)]
+        self.assertEqual(observed, expected, f"rows expected={expected} observed={observed}")
+
+    def test_each_row_gets_its_first_feasible_slot(self) -> None:
+        slots = [make_slot(slot=0, bar_slot=1, skill_id=501), make_slot(slot=1, bar_slot=2, skill_id=502)]
+
+        def first_only_for_agent_10(slot: InterruptSlot, cast: EnemyCast) -> bool:
+            return slot.skill_id == 502 or cast.agent_id == 10
+
+        rows = cast_rows([make_cast(agent_id=10), make_cast(agent_id=20)], slots, first_only_for_agent_10)
+        observed = [(row.cast.agent_id, row.slot.skill_id if row.slot else None) for row in rows]
+        self.assertEqual(observed, [(10, 501), (20, 502)], f"slots per row observed={observed}")
+
+    def test_rows_stop_at_the_tier_limit_like_choose_interrupt(self) -> None:
+        rows = cast_rows([make_cast(agent_id=10, activation_ms=3000)], [make_slot()], always)
+        observed = interrupt_from_rows(rows, Tier.ELITE)
+        self.assertIsNone(observed, f"long cast above limit ELITE must not be picked, observed={observed}")
+
+
 class BuildEligibilityTests(unittest.TestCase):
     def assert_eligible(self, candidate: BuildCandidate, expected: bool) -> None:
         observed = is_eligible_build(candidate)
@@ -270,6 +415,23 @@ class KeyEdgeTests(unittest.TestCase):
 
     def test_key_already_down_at_start_does_not_fire(self) -> None:
         self.assert_events([True, True, False, True], [False, False, False, True], "held when widget starts")
+
+
+class ShadowedPositionsTests(unittest.TestCase):
+    def check(self, indices: list[int], expected: set[int]) -> None:
+        observed = shadowed_positions(indices)
+        self.assertEqual(observed, frozenset(expected), f"indices={indices} expected={expected} observed={observed}")
+
+    def test_distinct_keys_shadow_nothing(self) -> None:
+        self.check([1, 2, 3], set())
+
+    def test_a_later_position_loses_to_an_earlier_one(self) -> None:
+        self.check([1, 1, 3], {1})
+        self.check([1, 2, 2], {2})
+        self.check([1, 2, 1], {2})
+
+    def test_three_equal_keys_keep_only_the_first(self) -> None:
+        self.check([3, 3, 3], {1, 2})
 
 
 class AutoToggleTests(unittest.TestCase):

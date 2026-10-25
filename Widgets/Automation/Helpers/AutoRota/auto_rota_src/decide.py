@@ -11,6 +11,7 @@ from typing import Sequence
 
 from .model import BuildCandidate
 from .model import CastKind
+from .model import CastRow
 from .model import Decision
 from .model import EnemyCast
 from .model import InterruptReach
@@ -56,6 +57,24 @@ def _cast_key(cast: EnemyCast) -> tuple[int, int]:
     return (int(classify(cast)), cast.remaining_ms)
 
 
+def _first_slot(cast: EnemyCast, slots: Sequence[InterruptSlot], feasible: FeasibilityCheck) -> Optional[InterruptSlot]:
+    """First slot, in the given (CombatClass priority) order, that can hit the cast and lands in time."""
+    for slot in slots:
+        if can_hit(slot.reach, cast.kind) and feasible(slot, cast):
+            return slot
+    return None
+
+
+def _interrupt_decision(cast: EnemyCast, slot: InterruptSlot, tier: Tier) -> Decision:
+    return Decision(
+        bar_slot=slot.bar_slot,
+        skill_id=slot.skill_id,
+        target_id=cast.agent_id,
+        label=f"Interrupt: {TIER_LABELS[tier]}",
+        enemy_skill_id=cast.skill_id,
+    )
+
+
 def choose_interrupt(
     casts: Sequence[EnemyCast],
     slots: Sequence[InterruptSlot],
@@ -72,15 +91,27 @@ def choose_interrupt(
         tier = classify(cast)
         if tier > max_tier:
             break  # casts are sorted by tier, so every remaining cast is above the limit too
-        for slot in slots:
-            if can_hit(slot.reach, cast.kind) and feasible(slot, cast):
-                return Decision(
-                    bar_slot=slot.bar_slot,
-                    skill_id=slot.skill_id,
-                    target_id=cast.agent_id,
-                    label=f"Interrupt: {TIER_LABELS[tier]}",
-                    enemy_skill_id=cast.skill_id,
-                )
+        slot = _first_slot(cast, slots, feasible)
+        if slot is not None:
+            return _interrupt_decision(cast, slot, tier)
+    return None
+
+
+def cast_rows(casts: Sequence[EnemyCast], slots: Sequence[InterruptSlot], feasible: FeasibilityCheck) -> list[CastRow]:
+    """Every cast in choose_interrupt's order, each with its first feasible slot (eager: the cast watch lists all)."""
+    return [
+        CastRow(cast=cast, tier=classify(cast), slot=_first_slot(cast, slots, feasible))
+        for cast in sorted(casts, key=_cast_key)
+    ]
+
+
+def interrupt_from_rows(rows: Sequence[CastRow], max_tier: Tier = Tier.OTHER) -> Optional[Decision]:
+    """The decision choose_interrupt makes, read from cast_rows output (same order, same slot rule)."""
+    for row in rows:
+        if row.tier > max_tier:
+            break
+        if row.slot is not None:
+            return _interrupt_decision(row.cast, row.slot, row.tier)
     return None
 
 

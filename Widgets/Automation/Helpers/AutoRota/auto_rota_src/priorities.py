@@ -22,6 +22,15 @@ TIER_LABELS: dict[Tier, str] = {
     Tier.OTHER: "Outro",
 }
 
+# RGBA for the cast watch window (warm = must stop, grey = least important).
+TIER_COLORS: dict[Tier, tuple[float, float, float, float]] = {
+    Tier.RESURRECTION: (0.95, 0.40, 0.40, 1.0),
+    Tier.HEALING: (1.00, 0.65, 0.25, 1.0),
+    Tier.ELITE: (1.00, 0.84, 0.30, 1.0),
+    Tier.LONG_CAST: (0.55, 0.75, 1.00, 1.0),
+    Tier.OTHER: (0.55, 0.55, 0.55, 1.0),
+}
+
 LONG_CAST_MS = 2000
 
 # In build mode the Auto Rota only interrupts casts up to this tier; lower tiers are left to the

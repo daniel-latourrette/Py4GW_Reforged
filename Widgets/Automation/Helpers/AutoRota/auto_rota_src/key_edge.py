@@ -5,6 +5,8 @@ This module must not import Py4GWCoreLib: it runs offline in unit tests.
 
 from __future__ import annotations
 
+from typing import Sequence
+
 
 class KeyEdge:
     """Turns a per-frame "is the key down" sample into one event per physical press."""
@@ -26,3 +28,14 @@ def next_auto_state(is_on: bool, toggle_pressed: bool, must_stop: bool) -> bool:
     if toggle_pressed:
         return not is_on
     return is_on
+
+
+def shadowed_positions(indices: Sequence[int]) -> frozenset[int]:
+    """Positions whose key is already taken by an earlier position (earlier positions win)."""
+    seen: set[int] = set()
+    shadowed: set[int] = set()
+    for position, index in enumerate(indices):
+        if index in seen:
+            shadowed.add(position)
+        seen.add(index)
+    return frozenset(shadowed)

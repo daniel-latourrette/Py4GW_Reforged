@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Optional
 
+from .priorities import Tier
+
 
 class CastKind(IntEnum):
     SPELL = 0
@@ -35,6 +37,7 @@ class EnemyCast:
     is_elite: bool
     activation_ms: int
     remaining_ms: int
+    elapsed_ms: Optional[int] = 0  # what the cast observer measured; None = not seen yet (no progress reading)
 
 
 @dataclass(frozen=True)
@@ -80,3 +83,12 @@ class BarSkill:
 class ActiveHex:
     skill_id: int
     remaining_ms: Optional[int]  # None when the game reports an implausible time ("?" in the window)
+
+
+@dataclass(frozen=True)
+class CastRow:
+    """One enemy cast in the interrupt choice order, with the first interrupt that lands on it (None: none in time)."""
+
+    cast: EnemyCast
+    tier: Tier
+    slot: Optional[InterruptSlot]
